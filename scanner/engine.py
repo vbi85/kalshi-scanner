@@ -8,6 +8,7 @@ Every cycle, for each market (BTC, Gold, Oil):
      beat Kalshi's price after fees -> TRADE (paper always; live only if gates passed).
   5. Max one trade per asset per window. Settle results, update gates, publish to dashboard.
 """
+import dataclasses
 import math
 import os
 import time
@@ -17,7 +18,7 @@ from zoneinfo import ZoneInfo
 
 from . import db, gates
 from .alerts import Alerter
-from .config import ASSETS, Config
+from .config import ASSET_LABEL, ASSET_ORDER, ASSETS, Config
 from .kalshi import KalshiPublic, KalshiTrader, parse_time, quote
 from .model import edges, fair_yes, momentum, taker_fee, up_side
 from .prices import get_price
@@ -51,11 +52,10 @@ class Engine:
         self.cfg = cfg
         self.pub = public or KalshiPublic(cfg)
         self.trader = trader
-        if self.trader is None and cfg.trading_mode == "live" and cfg.api_key_id and cfg.private_key_path:
-            try:
-                self.trader = KalshiTrader(cfg)
-            except Exception as e:
-                print(f"[engine] live trader not available: {e}")
+        self._injected = trader is not None      # tests pass a fake trader
+        self._key_version = None
+        self.demo = cfg.demo
+        self._last_mode = None
         self.price_fn = price_fn or get_price
         self.c = conn or db.connect(cfg.db_path)
         self.alerts = Alerter(cfg)
@@ -103,8 +103,44 @@ class Engine:
         if len(last) == n and all(r["status"] == "lost" for r in last):
             self.kill(f"{n} live losses in a row")
 
+    def mode(self):
+        """Paper/Live switch from the dashboard wins; .env TRADING_MODE is only the default."""
+        m = db.get(self.c, "trading_mode") or self.cfg.trading_mode
+        return "live" if m == "live" else "paper"
+
+    def refresh_trader(self):
+        """Load (or reload) the Kalshi API key saved from the dashboard, without restarting."""
+        if self._injected:
+            return
+        info = db.get(self.c, "kalshi_key")
+        if not info and self.cfg.api_key_id and self.cfg.private_key_path:
+            info = {"key_id": self.cfg.api_key_id, "path": self.cfg.private_key_path,
+                    "demo": self.cfg.demo, "version": "env"}
+        version = info.get("version") if info else None
+        if version == self._key_version:
+            return
+        self._key_version = version
+        self.trader = None
+        if not info:
+            return
+        try:
+            kcfg = dataclasses.replace(self.cfg, api_key_id=info["key_id"], private_key_path=info["path"],
+                                       demo=bool(info.get("demo")))
+            self.trader = KalshiTrader(kcfg)
+            self.demo = kcfg.demo
+            print(f"[engine] Kalshi key loaded ({'demo' if self.demo else 'real money'} account)")
+        except Exception as e:
+            self.err(f"Kalshi key could not be loaded: {e}")
+
+    def watch_mode(self):
+        m = self.mode()
+        if self._last_mode is not None and m != self._last_mode:
+            self.alerts.send(f"Bot switched to {m.upper()} mode."
+                             + (" Real orders only for approved markets." if m == "live" else ""), force=True)
+        self._last_mode = m
+
     def live_enabled(self, asset):
-        return (self.cfg.trading_mode == "live" and self.trader is not None
+        return (self.mode() == "live" and self.trader is not None
                 and not self.killed() and self.gate_status.get(asset, {}).get("passed", False))
 
     # ---------------- cycle steps ----------------
@@ -261,13 +297,13 @@ class Engine:
         self.check_loss_streak()
 
     def update_gates(self):
-        for asset in sorted({v["asset"] for v in self.series.values()} | {"BTC"}):
+        for asset in [a for a in ASSET_ORDER if a in {v["asset"] for v in self.series.values()} | {"BTC"}]:
             passed, checks, s = gates.evaluate(db.settled(self.c, "paper", asset), self.cfg)
             was = self.gate_status.get(asset, {}).get("passed")
             self.gate_status[asset] = {"passed": passed, "checks": checks, "stats": s}
             if passed and was is False:
                 self.alerts.send(f"{asset} PASSED all approval gates. "
-                                 f"{'Live trading active.' if self.cfg.trading_mode == 'live' else 'Set TRADING_MODE=live to go live.'}",
+                                 f"{'Live trading active.' if self.mode() == 'live' else 'Flip the switch to LIVE on the dashboard to trade it.'}",
                                  force=True)
             if was and not passed:
                 self.alerts.send(f"{asset} FAILED a gate. Back to paper only.", force=True)
@@ -287,11 +323,13 @@ class Engine:
             cards.setdefault(asset, {"asset": asset, "status": "NO MARKET",
                                      "note": "no 15-min window open (market hours?)",
                                      "spot": (prices.get(asset) or {}).get("price")})
-        order = {"BTC": 0, "GOLD": 1, "WTI": 2}
+        order = {a: i for i, a in enumerate(ASSET_ORDER)}
+        for c in cards.values():
+            c["label"] = ASSET_LABEL.get(c["asset"], c["asset"])
         db.put(self.c, "state", {
             "ts": time.time(),
-            "mode": self.cfg.trading_mode,
-            "demo": self.cfg.demo,
+            "mode": self.mode(),
+            "demo": self.demo,
             "live_ready": self.trader is not None,
             "killed": self.killed(),
             "kill_reason": db.get(self.c, "kill_reason", ""),
@@ -307,6 +345,8 @@ class Engine:
         })
 
     def cycle(self):
+        self.refresh_trader()
+        self.watch_mode()
         self.discover()
         px = self.prices()
         self.settle_open()
@@ -327,8 +367,9 @@ class Engine:
         return rows
 
     def run(self):
-        print(f"[engine] mode={self.cfg.trading_mode} demo={self.cfg.demo} live_ready={self.trader is not None}")
-        self.alerts.send(f"Kalshi bot started ({self.cfg.trading_mode} mode).", force=True)
+        self.refresh_trader()
+        print(f"[engine] mode={self.mode()} demo={self.demo} kalshi_connected={self.trader is not None}")
+        self.alerts.send(f"Kalshi bot started ({self.mode()} mode).", force=True)
         while True:
             t0 = time.time()
             try:

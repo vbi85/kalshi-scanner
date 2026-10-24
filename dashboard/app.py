@@ -13,11 +13,12 @@ from flask import Flask, Response, jsonify, redirect, request, send_from_directo
 from werkzeug.middleware.proxy_fix import ProxyFix
 
 from scanner import db
-from scanner.config import Config
+from scanner.config import ASSET_LABEL, Config
 
 cfg = Config()
 TZ = ZoneInfo(os.getenv("TZ_NAME", "America/Chicago"))
 app = Flask(__name__, static_folder="static", static_url_path="/static")
+app.json.sort_keys = False      # keep market order BTC, Gold, Oil, Nat Gas
 app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)   # behind Caddy (HTTPS)
 conn = db.connect(cfg.db_path)
 
@@ -138,7 +139,88 @@ def state():
     s["live"] = summary("live")
     s["recent"] = db.recent(conn, 20)
     s["server_ts"] = time.time()
+    s["labels"] = ASSET_LABEL
+    s["mode"] = db.get(conn, "trading_mode") or s.get("mode") or cfg.trading_mode   # switch shows instantly
+    k = db.get(conn, "kalshi_key")
+    s["kalshi"] = ({"connected": True, "key_hint": "…" + k["key_id"][-4:], "demo": bool(k.get("demo")),
+                    "connected_at": k.get("connected_at"), "balance": k.get("balance")}
+                   if k else {"connected": bool(cfg.api_key_id and cfg.private_key_path), "key_hint": "from .env"
+                              if cfg.api_key_id else None, "demo": cfg.demo})
     return jsonify(s)
+
+
+@app.post("/api/mode")
+@auth
+def set_mode():
+    body = request.get_json(silent=True) or {}
+    mode = body.get("mode")
+    if mode not in ("paper", "live"):
+        return jsonify(ok=False, error="mode must be paper or live"), 400
+    if mode == "live":
+        if (body.get("confirm") or "").strip().upper() != "LIVE":
+            return jsonify(ok=False, error='Type LIVE to confirm'), 400
+        k = db.get(conn, "kalshi_key")
+        if not k and not (cfg.api_key_id and cfg.private_key_path):
+            return jsonify(ok=False, error="Connect your Kalshi account first"), 400
+    db.put(conn, "trading_mode", mode)
+    return jsonify(ok=True, mode=mode)
+
+
+def _verify_key(key_id, pem_path, demo):
+    """Make one signed balance call to prove the key works. Returns balance in dollars."""
+    import dataclasses
+    from scanner.kalshi import KalshiTrader
+    kcfg = dataclasses.replace(cfg, api_key_id=key_id, private_key_path=pem_path, demo=demo)
+    return KalshiTrader(kcfg).balance()
+
+
+@app.post("/api/kalshi-key")
+@auth
+def save_key():
+    from cryptography.hazmat.primitives import serialization
+    body = request.get_json(silent=True) or {}
+    key_id = (body.get("key_id") or "").strip()
+    pem = (body.get("pem") or "").strip()
+    demo = bool(body.get("demo"))
+    if not key_id or len(key_id) < 8:
+        return jsonify(ok=False, error="Paste the Key ID from Kalshi"), 400
+    if "PRIVATE KEY" not in pem:
+        return jsonify(ok=False, error="Paste the whole private key, including the BEGIN and END lines"), 400
+    try:
+        serialization.load_pem_private_key(pem.encode(), password=None)
+    except Exception:
+        return jsonify(ok=False, error="That private key could not be read. Copy it again exactly."), 400
+
+    os.makedirs(cfg.key_dir, mode=0o700, exist_ok=True)
+    final = os.path.join(cfg.key_dir, "kalshi_key.pem")
+    tmp = final + ".new"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        f.write(pem + "\n")
+    try:
+        balance = _verify_key(key_id, tmp, demo)
+    except Exception as e:
+        os.remove(tmp)
+        msg = str(e)
+        hint = "Kalshi rejected the key — check the Key ID matches this private key"
+        if "demo" not in msg and demo:
+            hint += ", and that it is a DEMO key (demo.kalshi.co)"
+        return jsonify(ok=False, error=f"{hint}. ({msg[:120]})"), 400
+    os.replace(tmp, final)
+    db.put(conn, "kalshi_key", {"key_id": key_id, "path": os.path.abspath(final), "demo": demo,
+                                "version": str(time.time()), "connected_at": time.time(), "balance": balance})
+    return jsonify(ok=True, balance=balance, demo=demo)
+
+
+@app.delete("/api/kalshi-key")
+@auth
+def delete_key():
+    path = os.path.join(cfg.key_dir, "kalshi_key.pem")
+    if os.path.exists(path):
+        os.remove(path)
+    db.put(conn, "kalshi_key", None)
+    db.put(conn, "trading_mode", "paper")      # no key = no live trading
+    return jsonify(ok=True)
 
 
 @app.post("/api/kill")

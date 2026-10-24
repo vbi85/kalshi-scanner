@@ -1,5 +1,6 @@
 """Offline tests with fake Kalshi data. Run: python -m pytest -q"""
 import base64
+import os
 import time
 from datetime import datetime, timedelta, timezone
 
@@ -277,3 +278,72 @@ def test_dashboard_api(cfg):
     assert b"Kalshi 15-Min Bot" in client.get("/").data and b"manifest.json" in client.get("/").data
     client.get("/logout")
     assert client.get("/api/state").status_code == 401
+
+
+# ---------------- Natural gas, Paper/Live switch, Kalshi connection ----------------
+def test_natgas_classified():
+    assert classify_asset("KXNATGAS15M Natural Gas 15 min") == "NATGAS"
+    assert "KXNATGAS15M" in Config().series
+
+
+def _client(cfg):
+    import dashboard.app as dapp
+    dapp.conn = db.connect(cfg.db_path)
+    dapp.cfg.dash_password = ""            # no login for these tests
+    dapp.cfg.key_dir = os.path.join(os.path.dirname(cfg.db_path), "keys")
+    dapp.cfg.api_key_id = dapp.cfg.private_key_path = ""
+    return dapp, dapp.app.test_client()
+
+
+def _pem():
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric import rsa
+    k = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    return k.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.TraditionalOpenSSL,
+                           serialization.NoEncryption()).decode()
+
+
+def test_mode_switch_requires_key_and_confirmation(cfg, monkeypatch):
+    dapp, c = _client(cfg)
+    assert c.post("/api/mode", json={"mode": "live", "confirm": "LIVE"}).status_code == 400   # no key yet
+    monkeypatch.setattr(dapp, "_verify_key", lambda k, p, d: 123.45)
+    r = c.post("/api/kalshi-key", json={"key_id": "abcd-1234-efgh-5678", "pem": _pem(), "demo": True})
+    assert r.get_json()["ok"] and r.get_json()["balance"] == 123.45
+    saved = db.get(dapp.conn, "kalshi_key")
+    assert oct(os.stat(saved["path"]).st_mode & 0o777) == "0o600"          # private key locked down
+    s = c.get("/api/state").get_json()
+    assert s["kalshi"]["connected"] and s["kalshi"]["key_hint"] == "…5678" and s["kalshi"]["demo"]
+    assert "BEGIN" not in str(s)                                              # key never sent back
+    assert c.post("/api/mode", json={"mode": "live", "confirm": "nope"}).status_code == 400
+    assert c.post("/api/mode", json={"mode": "live", "confirm": "live"}).get_json()["ok"]
+    assert c.get("/api/state").get_json()["mode"] == "live"
+    c.delete("/api/kalshi-key")                                               # disconnect -> back to paper
+    s = c.get("/api/state").get_json()
+    assert s["mode"] == "paper" and not s["kalshi"]["connected"] and not os.path.exists(saved["path"])
+
+
+def test_bad_key_rejected(cfg, monkeypatch):
+    dapp, c = _client(cfg)
+    assert c.post("/api/kalshi-key", json={"key_id": "abcd-1234", "pem": "hello"}).status_code == 400
+
+    def boom(*a):
+        raise RuntimeError("401 unauthorized")
+    monkeypatch.setattr(dapp, "_verify_key", boom)
+    r = c.post("/api/kalshi-key", json={"key_id": "abcd-1234-efgh", "pem": _pem()})
+    assert r.status_code == 400 and "rejected" in r.get_json()["error"]
+    assert db.get(dapp.conn, "kalshi_key") is None
+    assert not os.listdir(dapp.cfg.key_dir)                                  # nothing left behind
+
+
+def test_engine_follows_dashboard_switch_and_loads_key(cfg, tmp_path):
+    e, pub, _ = run(cfg, [])
+    assert e.mode() == "paper" and e.trader is None
+    p = tmp_path / "k.pem"
+    p.write_text(_pem())
+    db.put(e.c, "kalshi_key", {"key_id": "abcd-1234-efgh", "path": str(p), "demo": True, "version": "1"})
+    db.put(e.c, "trading_mode", "live")
+    e.cycle()
+    assert e.mode() == "live" and e.trader is not None and e.demo is True    # hot-loaded, no restart
+    db.put(e.c, "kalshi_key", None)
+    e.cycle()
+    assert e.trader is None

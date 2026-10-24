@@ -1,6 +1,6 @@
 # Kalshi 15-Min Bot
 
-Predicts UP or DOWN on Kalshi's 15-minute BTC, Gold and WTI Oil markets and trades the setup.
+Predicts UP or DOWN on Kalshi's 15-minute BTC, Gold, WTI Oil and Natural Gas markets and trades the setup.
 Every trade is paper-traded first. **Live auto-trading unlocks per market only after that market
 passes every approval gate**, and stays inside hard risk caps. Text alerts + black dashboard.
 
@@ -30,7 +30,7 @@ Dashboard card statuses: WAITING → SETUP FORMING → TRADE → IN TRADE, or CL
 | Momentum improves predictions vs. no-momentum model | Brier score lower |
 | Last 50 trades profitable | > $0 |
 
-Gold and Oil use free Yahoo prices, which are often delayed. The bot blocks trades on delayed prices,
+Gold, Oil and Natural Gas use free Yahoo prices, which are often delayed. The bot blocks trades on delayed prices,
 so those markets may never unlock without a paid real-time feed.
 
 Gates are re-checked every cycle. An asset that starts failing drops back to paper automatically.
@@ -68,10 +68,17 @@ Text alerts reach you even when the app is closed.
   `SMS_GATEWAY_TO` (Verizon `@vtext.com`, T-Mobile `@tmomail.net` — e.g. `4145551234@tmomail.net`). AT&T no longer supports this.
 - **Any carrier:** Twilio (~1¢/text). Set `ALERT_METHOD=twilio` and the four `TWILIO_*` values.
 
-## Going live (only after gates are green)
-1. Kalshi → Account → API keys → create key, download the private key file.
-2. Upload it to `/opt/kalshi-scanner/kalshi_key.pem` (`chmod 600`, owned by `scanner`).
-3. Set `KALSHI_API_KEY_ID`, `TRADING_MODE=live`. Run a day with `KALSHI_DEMO=true` first.
+## Paper / Live switch
+The **Trading mode** switch at the top of the dashboard (phone too) flips between PAPER and LIVE.
+- LIVE needs a connected Kalshi account and typing `LIVE` to confirm.
+- Even in LIVE, only markets that passed every approval gate trade real money; the rest stay on paper.
+- Switching back to PAPER is instant. The red STOP button also halts live orders.
+
+## Connect Kalshi (API key)
+Dashboard → **Kalshi account → Connect**. Paste the Key ID and the full private key, tick "demo" if it's a
+demo-account key, and press **Connect & test**. The bot makes one balance check to prove the key works, saves it
+on your server only (`keys/kalshi_key.pem`, owner-read-only), and starts using it within seconds — no restart.
+**Disconnect** deletes the key and returns to PAPER. Tip: connect a demo key first and run LIVE on fake money.
 
 ## Google Sheets
 Dashboard → **Download CSV** → Google Sheets → File → Import.

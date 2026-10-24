@@ -29,7 +29,7 @@ if [ ! -f .env ]; then
   sed -i "s/^DASH_PASSWORD=.*/DASH_PASSWORD=$PW/" .env
   NEW_PW=1
 fi
-mkdir -p data && chown -R scanner:scanner "$APP" && chmod 600 .env
+mkdir -p data keys && chmod 700 keys && chown -R scanner:scanner "$APP" && chmod 600 .env
 
 echo "==> Starting services"
 cp deploy/kalshi-engine.service deploy/kalshi-dashboard.service /etc/systemd/system/

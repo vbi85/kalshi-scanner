@@ -40,6 +40,38 @@
   .resume{background:#1f1f22;color:var(--text);border:1px solid #333}
   a.btn{display:inline-block;background:#1f1f22;color:var(--text);border:1px solid #333;border-radius:10px;padding:9px 16px;text-decoration:none;font-weight:600}
   .grid{display:grid;gap:12px}
+  /* control bar */
+  .controls{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px}
+  .ctl .l{font-size:12px;color:var(--dim);text-transform:uppercase;letter-spacing:1px;margin-bottom:8px}
+  .seg{display:grid;grid-template-columns:1fr 1fr;background:#151517;border:1px solid #26262a;border-radius:12px;padding:4px;gap:4px}
+  .seg button{padding:12px;border-radius:9px;background:transparent;color:var(--dim);font-size:16px;letter-spacing:.5px}
+  .seg button.on.paper{background:#2a2300;color:var(--amber)}
+  .seg button.on.live{background:var(--green);color:#000}
+  .ctl .sub{font-size:13px;color:var(--dim);margin-top:8px}
+  .conn{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+  .dot{width:10px;height:10px;border-radius:50%;background:#444;display:inline-block}
+  .dot.ok{background:var(--green)} .dot.demo{background:var(--blue)}
+  .conn .big{font-size:17px;font-weight:700}
+  .btn2{background:#1f1f22;color:var(--text);border:1px solid #333;border-radius:10px;padding:10px 16px;font-weight:700}
+  .btn-green{background:var(--green);color:#000}
+  /* bottom sheet / modal */
+  .sheet-bg{position:fixed;inset:0;background:rgba(0,0,0,.72);display:none;align-items:flex-end;justify-content:center;z-index:50}
+  .sheet-bg.show{display:flex}
+  .sheet{background:#0e0e10;border:1px solid #26262a;border-radius:18px 18px 0 0;width:100%;max-width:560px;
+         max-height:92vh;overflow:auto;padding:20px;padding-bottom:max(20px, env(safe-area-inset-bottom))}
+  @media (min-width:700px){ .sheet-bg{align-items:center} .sheet{border-radius:18px} }
+  .sheet h3{margin:0 0 6px;font-size:20px}
+  .sheet p{color:var(--dim);font-size:14px;margin:0 0 14px}
+  .sheet input[type=text],.sheet textarea{width:100%;font:inherit;font-size:16px;padding:12px 14px;border-radius:12px;
+         border:1px solid #2a2a2e;background:#0b0b0c;color:var(--text);margin-bottom:12px}
+  .sheet textarea{height:140px;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px}
+  .sheet input:focus,.sheet textarea:focus{outline:none;border-color:var(--green)}
+  .sheet .row{display:flex;gap:10px;margin-top:6px} .sheet .row>*{flex:1;padding:14px;font-size:16px}
+  .sheet ol{color:var(--dim);font-size:14px;padding-left:20px;margin:0 0 14px} .sheet li{margin-bottom:4px}
+  .sheet .err{color:var(--red);font-size:14px;min-height:20px;margin-bottom:8px}
+  .sheet label.chk{display:flex;align-items:flex-start;gap:10px;font-size:15px;margin-bottom:14px}
+  .sheet label.chk input{width:20px;height:20px;margin-top:1px;flex:none}
+  .sheet .warn{background:#2a0606;border:1px solid #6b1010;color:#ffb4b4;border-radius:12px;padding:12px;font-size:14px;margin-bottom:14px}
   .kpis{grid-template-columns:repeat(auto-fit,minmax(170px,1fr))}
   .card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:16px}
   .kpi .label{color:var(--dim);font-size:12px;text-transform:uppercase;letter-spacing:1px}
@@ -111,6 +143,7 @@
     header .acts>*{text-align:center;padding:12px 10px}
     .hm{display:none} table{min-width:0} th,td{padding:9px 8px;font-size:14px}
     .gates .card{padding:14px}
+    .controls{grid-template-columns:1fr}
   }
 </style>
 </head>
@@ -128,7 +161,68 @@
   </header>
   <div id="killmsg" class="card" style="display:none;border-color:#6b1010;color:var(--red);margin-bottom:12px"></div>
 
+  <div class="controls">
+    <div class="card ctl">
+      <div class="l">Trading mode</div>
+      <div class="seg">
+        <button id="segPaper" class="paper" onclick="setMode('paper')">PAPER</button>
+        <button id="segLive" class="live" onclick="askLive()">LIVE</button>
+      </div>
+      <div class="sub" id="modeSub"></div>
+    </div>
+    <div class="card ctl">
+      <div class="l">Kalshi account</div>
+      <div class="conn">
+        <span class="dot" id="kDot"></span>
+        <span class="big" id="kText">Not connected</span>
+        <span class="spacer" style="flex:1"></span>
+        <button class="btn2" id="kBtn" onclick="openSheet('keySheet')">Connect</button>
+      </div>
+      <div class="sub" id="kSub">Paper trading works without it. Needed only for LIVE.</div>
+    </div>
+  </div>
+
   <div class="grid markets" id="cards"></div>
+
+  <!-- Go LIVE confirmation -->
+  <div class="sheet-bg" id="liveSheet" onclick="if(event.target===this)closeSheet('liveSheet')">
+    <div class="sheet">
+      <h3>Switch to LIVE trading?</h3>
+      <div class="warn">Real money. The bot will place real orders on Kalshi without asking you first.</div>
+      <p id="liveWho"></p>
+      <p>Limits still apply: max $<span id="lvMax"></span> per trade, $<span id="lvLoss"></span> daily loss cap, and the red STOP button works any time.</p>
+      <input type="text" id="liveConfirm" placeholder='Type LIVE to confirm' autocapitalize="characters" autocomplete="off">
+      <div class="err" id="liveErr"></div>
+      <div class="row">
+        <button class="btn2" onclick="closeSheet('liveSheet')">Cancel</button>
+        <button class="kill" onclick="confirmLive()">Go LIVE</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Connect Kalshi -->
+  <div class="sheet-bg" id="keySheet" onclick="if(event.target===this)closeSheet('keySheet')">
+    <div class="sheet">
+      <h3>Connect your Kalshi account</h3>
+      <p>Your key is saved only on your own server, over a secure connection. It is never shown again.</p>
+      <ol>
+        <li>On kalshi.com, open your account settings → <b>API keys</b> → <b>Create key</b>.</li>
+        <li>Copy the <b>Key ID</b> into the first box.</li>
+        <li>Open the downloaded <b>.pem</b> / <b>.txt</b> file, copy <b>everything</b> (including the BEGIN and END lines) into the second box.</li>
+      </ol>
+      <input type="text" id="kId" placeholder="Key ID" autocomplete="off" autocapitalize="none" spellcheck="false">
+      <textarea id="kPem" placeholder="-----BEGIN RSA PRIVATE KEY-----&#10;...&#10;-----END RSA PRIVATE KEY-----" spellcheck="false" autocapitalize="none"></textarea>
+      <label class="chk"><input type="checkbox" id="kDemo"><span>This is a <b>demo</b> account key (fake money, demo.kalshi.co)</span></label>
+      <div class="err" id="kErr"></div>
+      <div class="row">
+        <button class="btn2" onclick="closeSheet('keySheet')">Cancel</button>
+        <button class="btn2 btn-green" id="kSave" onclick="saveKey()">Connect &amp; test</button>
+      </div>
+      <div id="kDisc" style="display:none;margin-top:16px;text-align:center">
+        <button class="btn2" style="color:var(--red)" onclick="disconnectKey()">Disconnect Kalshi (switches to PAPER)</button>
+      </div>
+    </div>
+  </div>
 
   <h2>Results</h2>
   <div class="grid kpis">
@@ -157,6 +251,8 @@
 const $ = id => document.getElementById(id);
 const money = v => (v<0?'-':'') + '$' + Math.abs(v||0).toFixed(2);
 const cls = v => v>0?'pos':(v<0?'neg':'');
+let LABELS = {};
+const lbl = a => LABELS[a] || a;
 const esc = s => String(s??'').replace(/[&<>"]/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 const num = (v,d=2) => v==null?'—':Number(v).toLocaleString(undefined,{minimumFractionDigits:d,maximumFractionDigits:d});
 const mmss = s => { s=Math.max(0,Math.round(s)); return Math.floor(s/60)+':'+String(s%60).padStart(2,'0'); };
@@ -196,7 +292,7 @@ function cardHTML(c){
   }
   const note = (c.close_ts && c.status!=='WAITING') ? `<div class="muted" style="font-size:13px;margin-top:6px">${esc(c.note)}</div>` : '';
   return `<div class="card mk s-${sid}">
-    <div class="mk-head"><b>${esc(c.asset)}</b><span class="st ${sid}">${esc(c.status)}</span></div>
+    <div class="mk-head"><b>${esc(c.label||c.asset)}</b><span class="st ${sid}">${esc(c.status)}</span></div>
     ${clock}${tl}
     <div class="row2">
       <div class="stat"><div class="l">Target</div><div class="v">${num(c.target,decimals)}</div></div>
@@ -235,16 +331,33 @@ async function load(){
     s = await res.json();
   }catch(e){ $('age').textContent='connection lost — retrying'; $('health').classList.add('stale'); return; }
   skew = s.server_ts - Date.now()/1000;
+  LABELS = s.labels || {};
   cfg = Object.assign(cfg, s.settings||{});
   const age = s.ts ? Math.round(s.server_ts - s.ts) : null;
   $('age').textContent = age==null ? 'bot not started' : `updated ${age}s ago`;
   $('health').classList.toggle('stale', age==null || age > 60);
 
   killed = s.killed;
-  const anyLive = Object.values(s.gates||{}).some(g=>g.passed) && s.mode==='live' && s.live_ready;
+  lastState = s;
+  const K = s.kalshi||{};
+  const anyLive = Object.values(s.gates||{}).some(g=>g.passed) && s.mode==='live' && K.connected;
+  $('segPaper').classList.toggle('on', s.mode!=='live');
+  $('segLive').classList.toggle('on', s.mode==='live');
+  const approved = Object.entries(s.gates||{}).filter(([a,g])=>g.passed).map(([a])=>lbl(a));
+  $('modeSub').innerHTML = s.mode==='live'
+    ? (approved.length ? `Real orders on: <b class="pos">${approved.join(', ')}</b>. Others stay on paper.`
+                       : `<span style="color:var(--amber)">LIVE is on, but no market has passed its gates yet — all trades are still paper.</span>`)
+    : 'Simulated trades only. No real money.';
+  $('kDot').className = 'dot' + (K.connected ? (K.demo?' demo':' ok') : '');
+  $('kText').textContent = K.connected ? (K.demo ? 'Connected — DEMO' : 'Connected') : 'Not connected';
+  $('kBtn').textContent = K.connected ? 'Manage' : 'Connect';
+  $('kSub').innerHTML = K.connected
+    ? `Key ${esc(K.key_hint||'')} · balance ${s.balance!=null?money(s.balance):(K.balance!=null?money(K.balance):'—')}${K.demo?' (fake money)':''}`
+    : 'Paper trading works without it. Needed only for LIVE.';
+  $('kDisc').style.display = K.connected && K.key_hint!=='from .env' ? 'block' : 'none';
   const m = $('mode');
   if (killed){ m.className='badge b-kill'; m.textContent='STOPPED'; }
-  else if (anyLive){ m.className='badge b-live'; m.textContent= s.demo?'LIVE (DEMO)':'LIVE'; }
+  else if (anyLive){ m.className='badge b-live'; m.textContent= K.demo?'LIVE (DEMO)':'LIVE'; }
   else if (s.mode==='live'){ m.className='badge b-paper'; m.textContent='LIVE LOCKED — PAPER'; }
   else { m.className='badge b-paper'; m.textContent='PAPER'; }
   $('killbtn').textContent = killed ? 'RESUME' : 'STOP LIVE TRADING';
@@ -261,7 +374,7 @@ async function load(){
   $('paperAll').textContent = money(P.pnl_all); $('paperAll').className='val '+cls(P.pnl_all);
   $('paperSub').textContent = `${P.trades||0} settled · win rate ${P.win_rate??'—'}%`;
   $('bal').textContent = s.balance==null ? '—' : money(s.balance);
-  $('balSub').textContent = s.live_ready ? (s.demo?'demo account':'connected') : 'no API key (paper only)';
+  $('balSub').textContent = K.connected ? (K.demo?'demo account':'connected') : 'not connected (paper only)';
   $('sigToday').textContent = P.signals_today||0;
   $('openPos').textContent = `${P.open||0} paper open · ${L.open||0} live open`;
 
@@ -270,7 +383,7 @@ async function load(){
     const ok = x.checks.filter(c=>c.ok).length, n = x.checks.length;
     const chip = x.passed ? '<span class="chip ok">APPROVED</span>' : `<span class="chip no">${ok} / ${n} PASSED</span>`;
     const open = innerWidth >= 600 || openGates.has(a) ? ' open' : '';
-    return `<details class="card gate" data-asset="${esc(a)}"${open}><summary><div class="gate-head"><b>${esc(a)}</b>${chip}</div>
+    return `<details class="card gate" data-asset="${esc(a)}"${open}><summary><div class="gate-head"><b>${esc(lbl(a))}</b>${chip}</div>
       <div class="bar"><div style="width:${100*ok/n}%"></div></div></summary>
       ${x.checks.map(c=>`<div class="check"><span><span class="tick ${c.ok?'pos':'neg'}">${c.ok?'✓':'✗'}</span>${esc(c.name)}</span>
         <span class="v">${esc(c.value)} <span class="muted">/ ${esc(c.target)}</span></span></div>`).join('')}</details>`;
@@ -280,7 +393,7 @@ async function load(){
   $('trades').innerHTML = t.length ? t.map(r=>`<tr>
     <td>${new Date(r.ts*1000).toLocaleString([], (innerWidth<600?{hour:'numeric',minute:'2-digit'}:{month:'short',day:'numeric',hour:'numeric',minute:'2-digit'}))}</td>
     <td class="hm"><span class="tag ${r.mode==='live'?'live':''}">${r.mode.toUpperCase()}</span></td>
-    <td><b>${esc(r.asset)}</b>${r.mode==='live'?' <span class="tag live">LIVE</span>':''}</td>
+    <td><b>${esc(lbl(r.asset))}</b>${r.mode==='live'?' <span class="tag live">LIVE</span>':''}</td>
     <td class="${r.direction==='UP'?'up':(r.direction==='DOWN'?'down':'')}">${r.direction==='UP'?'▲ UP':(r.direction==='DOWN'?'▼ DOWN':'—')}</td>
     <td class="hm">${r.side.toUpperCase()}</td><td class="hm">${r.contracts}</td><td class="hm">${r.price.toFixed(2)}</td>
     <td class="hm">${r.fair==null?'—':((r.side==='yes'?r.fair:1-r.fair)*100).toFixed(0)+'%'}</td>
@@ -291,10 +404,56 @@ async function load(){
 
   const p = s.prices||{};
   $('feeds').innerHTML = Object.entries(p).map(([a,x])=> x
-      ? `<b style="color:var(--text)">${esc(a)}</b> ${Number(x.price).toLocaleString()} <span class="${x.age_sec>60?'neg':''}">(${x.age_sec<60?'live':Math.round(x.age_sec/60)+' min delayed'})</span>`
-      : `<b style="color:var(--text)">${esc(a)}</b> <span class="neg">feed down</span>`).join(' &nbsp;·&nbsp; ')
+      ? `<b style="color:var(--text)">${esc(lbl(a))}</b> ${Number(x.price).toLocaleString()} <span class="${x.age_sec>60?'neg':''}">(${x.age_sec<60?'live':Math.round(x.age_sec/60)+' min delayed'})</span>`
+      : `<b style="color:var(--text)">${esc(lbl(a))}</b> <span class="neg">feed down</span>`).join(' &nbsp;·&nbsp; ')
     + `<br>Min edge ${cfg.min_edge} · min momentum ${cfg.mom_min_z}σ · max $${cfg.max_dollars}/trade · daily loss cap $${cfg.max_daily_loss}`;
   $('errors').textContent = (s.errors||[]).join('\n');
+}
+
+let lastState = {};
+function openSheet(id){ $(id).classList.add('show'); }
+function closeSheet(id){ $(id).classList.remove('show'); }
+async function post(url, body, method='POST'){
+  const res = await fetch(url, {method, headers:{'Content-Type':'application/json'}, body: body?JSON.stringify(body):undefined});
+  if (res.status === 401){ location.href='/login'; throw new Error('login'); }
+  return res.json();
+}
+async function setMode(mode){
+  if (mode==='paper' && lastState.mode==='live' && !confirm('Switch to PAPER? No more real orders.')) return;
+  await post('/api/mode', {mode}); load();
+}
+function askLive(){
+  if (lastState.mode==='live') return;
+  const K = lastState.kalshi||{};
+  if (!K.connected){ $('kErr').textContent='Connect your Kalshi account first, then switch to LIVE.'; openSheet('keySheet'); return; }
+  const approved = Object.entries(lastState.gates||{}).filter(([a,g])=>g.passed).map(([a])=>lbl(a));
+  $('liveWho').innerHTML = approved.length
+    ? `It will trade for real on: <b>${approved.join(', ')}</b>. Markets that haven't passed their gates stay on paper.`
+    : `<b>No market has passed its approval gates yet</b>, so nothing will trade for real until one does. You can turn LIVE on now and it will start automatically when a market is approved.`;
+  $('lvMax').textContent = (lastState.settings||{}).max_dollars ?? '—';
+  $('lvLoss').textContent = (lastState.settings||{}).max_daily_loss ?? '—';
+  $('liveConfirm').value=''; $('liveErr').textContent='';
+  openSheet('liveSheet'); setTimeout(()=>$('liveConfirm').focus(), 50);
+}
+async function confirmLive(){
+  const r = await post('/api/mode', {mode:'live', confirm:$('liveConfirm').value});
+  if (!r.ok){ $('liveErr').textContent = r.error; return; }
+  closeSheet('liveSheet'); load();
+}
+async function saveKey(){
+  $('kErr').textContent=''; $('kSave').disabled=true; $('kSave').textContent='Testing…';
+  try{
+    const r = await post('/api/kalshi-key', {key_id:$('kId').value, pem:$('kPem').value, demo:$('kDemo').checked});
+    if (!r.ok){ $('kErr').textContent = r.error; return; }
+    $('kPem').value=''; $('kId').value='';
+    closeSheet('keySheet');
+    alert(`Kalshi connected${r.demo?' (DEMO)':''}. Balance: ${money(r.balance)}`);
+    load();
+  } finally { $('kSave').disabled=false; $('kSave').textContent='Connect & test'; }
+}
+async function disconnectKey(){
+  if (!confirm('Disconnect Kalshi? The key is deleted from your server and the bot goes back to PAPER.')) return;
+  await post('/api/kalshi-key', null, 'DELETE'); closeSheet('keySheet'); load();
 }
 
 async function toggleKill(){

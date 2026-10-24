@@ -33,7 +33,7 @@ class Config:
     private_key_path: str = _env("KALSHI_PRIVATE_KEY_PATH", "")
 
     # ---------- What to scan ----------
-    series: list = field(default_factory=lambda: _list("SERIES", "KXBTC15M,KXGOLD15M,KXWTI15M"))
+    series: list = field(default_factory=lambda: _list("SERIES", "KXBTC15M,KXGOLD15M,KXWTI15M,KXNATGAS15M"))
     auto_discover: bool = _bool("AUTO_DISCOVER", "false")
     discover_categories: list = field(default_factory=lambda: _list("DISCOVER_CATEGORIES", "Crypto,Commodities"))
     discover_every_min: int = int(_env("DISCOVER_EVERY_MIN", "30"))
@@ -57,6 +57,7 @@ class Config:
 
     # ---------- Trading mode ----------
     # paper = simulate only. live = place real orders, but ONLY for assets that pass every approval gate.
+    # This is only the starting value. The Paper/Live switch on the dashboard overrides it.
     trading_mode: str = _env("TRADING_MODE", "paper").lower()
 
     # ---------- Approval gates (must ALL pass, per asset, before live trading unlocks) ----------
@@ -96,6 +97,7 @@ class Config:
 
     # ---------- Storage ----------
     db_path: str = _env("DB_PATH", "data/trades.db")
+    key_dir: str = _env("KEY_DIR", "keys")          # where the dashboard saves your Kalshi private key
 
     @property
     def order_base(self):
@@ -104,10 +106,13 @@ class Config:
 
 # Underlying price feed per asset. Patterns match "<series ticker> <series title>" in lower case.
 ASSETS = {
-    "BTC":    {"patterns": [r"\bbitcoin\b", r"\bkxbtc"],                          "feed": "coinbase", "symbol": "BTC-USD"},
-    "GOLD":   {"patterns": [r"\bgold\b", r"\bkxgold"],                                         "feed": "yahoo",    "symbol": "GC=F"},
-    "WTI":    {"patterns": [r"\bwti\b", r"\bkxwti", r"\bcrude\b"],                "feed": "yahoo",    "symbol": "CL=F"},
+    "BTC":    {"patterns": [r"\bbitcoin\b", r"\bkxbtc"],                           "feed": "coinbase", "symbol": "BTC-USD"},
+    "GOLD":   {"patterns": [r"\bgold\b", r"\bkxgold"],                             "feed": "yahoo",    "symbol": "GC=F"},
+    "WTI":    {"patterns": [r"\bwti\b", r"\bkxwti", r"\bcrude\b"],                 "feed": "yahoo",    "symbol": "CL=F"},
+    "NATGAS": {"patterns": [r"\bnatural gas\b", r"\bkxnatgas", r"\bhenry hub\b"], "feed": "yahoo",    "symbol": "NG=F"},
 }
+ASSET_ORDER = ["BTC", "GOLD", "WTI", "NATGAS"]
+ASSET_LABEL = {"BTC": "BTC", "GOLD": "GOLD", "WTI": "OIL (WTI)", "NATGAS": "NAT GAS"}
 
 EXCLUDE_PATTERNS = [r"\bethereum\b", r"\bkxeth", r"\bsolana\b", r"\bxrp\b", r"\bdoge", r"\bbrent\b",
                     r"\bgasoline\b", r"\bgas prices?\b", r"\bdominance\b"]
