@@ -256,7 +256,17 @@ def test_dashboard_api(cfg):
     e, _, _ = run(cfg, [mk("KXBTC15M-A", 99_900, 0.55, 0.50)])
     import dashboard.app as dapp
     dapp.conn = db.connect(cfg.db_path)
+    dapp.cfg.dash_user, dapp.cfg.dash_password = "admin", "s3cret"
     client = dapp.app.test_client()
+    # locked until signed in; app files stay public so the phone can install it
+    assert client.get("/").status_code == 302
+    assert client.get("/api/state").status_code == 401
+    assert client.post("/api/kill").status_code == 401
+    for path in ("/manifest.json", "/sw.js", "/icons/icon-192.png", "/login"):
+        assert client.get(path).status_code == 200, path
+    assert client.post("/login", data={"username": "admin", "password": "nope"}).status_code == 401
+    r = client.post("/login", data={"username": "admin", "password": "s3cret", "remember": "on"})
+    assert r.status_code == 302
     s = client.get("/api/state").get_json()
     assert s["paper"]["signals_today"] == 1
     assert [c["asset"] for c in s["cards"]] == ["BTC", "GOLD"]
@@ -264,4 +274,6 @@ def test_dashboard_api(cfg):
     assert client.post("/api/kill").status_code == 200
     assert client.get("/api/state").get_json()["killed"] is True
     assert b"direction" in client.get("/export.csv").data
-    assert b"Kalshi 15-Min Bot" in client.get("/").data
+    assert b"Kalshi 15-Min Bot" in client.get("/").data and b"manifest.json" in client.get("/").data
+    client.get("/logout")
+    assert client.get("/api/state").status_code == 401

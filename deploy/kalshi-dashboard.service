@@ -1,11 +1,11 @@
 [Unit]
-Description=Kalshi scanner dashboard
+Description=Kalshi bot dashboard (served to the internet by Caddy over HTTPS)
 After=network-online.target
 
 [Service]
 User=scanner
 WorkingDirectory=/opt/kalshi-scanner
-ExecStart=/opt/kalshi-scanner/.venv/bin/gunicorn -w 1 -b 0.0.0.0:8080 dashboard.app:app
+ExecStart=/opt/kalshi-scanner/.venv/bin/gunicorn -w 1 --threads 4 -b 127.0.0.1:8080 dashboard.app:app
 Restart=always
 RestartSec=10
 

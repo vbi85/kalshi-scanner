@@ -1,32 +1,109 @@
-"""Dashboard: black, simple, password-protected. Run: python -m dashboard.app"""
+"""Dashboard: black, simple, phone-installable, password-protected. Run: python -m dashboard.app"""
 import csv
+import hmac
 import io
 import os
+import secrets
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from functools import wraps
 from zoneinfo import ZoneInfo
 
-from flask import Flask, Response, jsonify, request, send_from_directory
+from flask import Flask, Response, jsonify, redirect, request, send_from_directory, session
+from werkzeug.middleware.proxy_fix import ProxyFix
 
 from scanner import db
 from scanner.config import Config
 
 cfg = Config()
 TZ = ZoneInfo(os.getenv("TZ_NAME", "America/Chicago"))
-app = Flask(__name__, static_folder="static")
+app = Flask(__name__, static_folder="static", static_url_path="/static")
+app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)   # behind Caddy (HTTPS)
 conn = db.connect(cfg.db_path)
+
+# Session secret is created once and kept in the database, so logins survive restarts.
+_secret = db.get(conn, "session_secret")
+if not _secret:
+    _secret = secrets.token_hex(32)
+    db.put(conn, "session_secret", _secret)
+app.secret_key = _secret
+app.config.update(SESSION_COOKIE_HTTPONLY=True, SESSION_COOKIE_SAMESITE="Lax",
+                  PERMANENT_SESSION_LIFETIME=timedelta(days=30))
+
+_fails = {}   # ip -> [count, first_fail_ts]   simple brute-force lockout
+
+
+def _locked(ip):
+    n, t0 = _fails.get(ip, (0, 0))
+    if time.time() - t0 > 600:
+        _fails.pop(ip, None)
+        return False
+    return n >= 5
 
 
 def auth(f):
     @wraps(f)
     def wrap(*a, **kw):
-        if cfg.dash_password:
-            a_ = request.authorization
-            if not a_ or a_.username != cfg.dash_user or a_.password != cfg.dash_password:
-                return Response("Login required", 401, {"WWW-Authenticate": 'Basic realm="Scanner"'})
+        if cfg.dash_password and not session.get("ok"):
+            if request.path.startswith("/api/") or request.path.endswith(".csv"):
+                return jsonify(error="login required"), 401
+            return redirect("/login")
         return f(*a, **kw)
     return wrap
+
+
+def _login_page(error=""):
+    html = open(os.path.join(app.static_folder, "login.html"), encoding="utf-8").read()
+    return html.replace("{{ERROR}}", error)
+
+
+@app.get("/login")
+def login_form():
+    if not cfg.dash_password or session.get("ok"):
+        return redirect("/")
+    return _login_page()
+
+
+@app.post("/login")
+def login():
+    ip = request.remote_addr or "?"
+    if _locked(ip):
+        return _login_page("Too many attempts. Try again in 10 minutes."), 429
+    u, p = request.form.get("username", ""), request.form.get("password", "")
+    if hmac.compare_digest(u, cfg.dash_user) and hmac.compare_digest(p, cfg.dash_password or ""):
+        _fails.pop(ip, None)
+        session.clear()
+        session["ok"] = True
+        session.permanent = bool(request.form.get("remember"))
+        app.config["SESSION_COOKIE_SECURE"] = request.scheme == "https"
+        return redirect("/")
+    n, t0 = _fails.get(ip, (0, time.time()))
+    _fails[ip] = (n + 1, t0)
+    return _login_page("Wrong username or password."), 401
+
+
+@app.get("/logout")
+def logout():
+    session.clear()
+    return redirect("/login")
+
+
+# App files: public on purpose (no data in them) so the phone can install the app.
+@app.get("/manifest.json")
+def manifest():
+    return send_from_directory(app.static_folder, "manifest.json", mimetype="application/manifest+json")
+
+
+@app.get("/sw.js")
+def service_worker():
+    r = send_from_directory(app.static_folder, "sw.js", mimetype="application/javascript")
+    r.headers["Cache-Control"] = "no-cache"
+    return r
+
+
+@app.get("/icons/<path:name>")
+def icons(name):
+    return send_from_directory(os.path.join(app.static_folder, "icons"), name)
 
 
 def summary(mode):

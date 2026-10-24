@@ -2,7 +2,15 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#000000">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Kalshi Bot">
+<link rel="manifest" href="/manifest.json">
+<link rel="icon" href="/icons/icon-192.png">
+<link rel="apple-touch-icon" href="/icons/apple-touch-icon.png">
 <title>Kalshi 15-Min Bot</title>
 <style>
   :root{
@@ -11,7 +19,11 @@
   }
   *{box-sizing:border-box}
   body{margin:0;background:var(--bg);color:var(--text);font:15px/1.45 -apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif}
-  .wrap{max-width:1280px;margin:0 auto;padding:16px}
+  html{background:#000}
+  .wrap{max-width:1280px;margin:0 auto;padding:16px;
+        padding-top:max(16px, env(safe-area-inset-top));padding-bottom:max(24px, env(safe-area-inset-bottom));
+        padding-left:max(16px, env(safe-area-inset-left));padding-right:max(16px, env(safe-area-inset-right))}
+  a.link{color:var(--dim);font-size:13px;text-decoration:none}
   header{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:16px}
   h1{font-size:20px;margin:0}
   h2{font-size:13px;text-transform:uppercase;letter-spacing:1.2px;color:var(--dim);margin:28px 0 10px;font-weight:600}
@@ -68,6 +80,10 @@
   .action b{font-size:15px}
 
   .gates{grid-template-columns:repeat(auto-fit,minmax(260px,1fr))}
+  details.gate summary{list-style:none;cursor:pointer}
+  details.gate summary::-webkit-details-marker{display:none}
+  details.gate:not([open]) .bar{margin-bottom:0}
+  details.gate .chip::after{content:" ›"} details.gate[open] .chip::after{content:""}
   .gate-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:10px}
   .gate-head b{font-size:18px}
   .chip{font-size:12px;font-weight:700;padding:3px 10px;border-radius:999px}
@@ -87,7 +103,15 @@
   .tag.won{color:var(--green)} .tag.lost{color:var(--red)} .tag.open{color:var(--blue)}
   .errors{color:var(--amber);font-size:13px;white-space:pre-wrap}
   .empty{padding:22px;color:var(--dim);text-align:center}
-  @media (max-width:600px){ .clock{font-size:44px} h1{font-size:17px} .kpi .val{font-size:22px} }
+  @media (max-width:600px){
+    .clock{font-size:48px} h1{font-size:17px} .kpi .val{font-size:20px}
+    .kpis{grid-template-columns:1fr 1fr} .markets{grid-template-columns:1fr}
+    header{gap:8px} header .spacer{display:none}
+    header .acts{width:100%;display:grid;grid-template-columns:1fr 1fr;gap:8px}
+    header .acts>*{text-align:center;padding:12px 10px}
+    .hm{display:none} table{min-width:0} th,td{padding:9px 8px;font-size:14px}
+    .gates .card{padding:14px}
+  }
 </style>
 </head>
 <body>
@@ -97,8 +121,10 @@
     <span id="mode" class="badge b-paper">PAPER</span>
     <span id="health" class="muted"><span class="pulse"></span><span id="age">—</span></span>
     <span class="spacer"></span>
-    <a class="btn" href="/export.csv">Download CSV</a>
-    <button id="killbtn" class="kill" onclick="toggleKill()">STOP LIVE TRADING</button>
+    <span class="acts">
+      <a class="btn" href="/export.csv">Download CSV</a>
+      <button id="killbtn" class="kill" onclick="toggleKill()">STOP LIVE TRADING</button>
+    </span>
   </header>
   <div id="killmsg" class="card" style="display:none;border-color:#6b1010;color:var(--red);margin-bottom:12px"></div>
 
@@ -117,13 +143,14 @@
 
   <h2>Recent trades</h2>
   <div class="tablewrap"><table>
-    <thead><tr><th>Time</th><th>Mode</th><th>Market</th><th>Call</th><th>Bought</th><th>Qty</th><th>Price</th><th>Odds</th><th>Time left</th><th>Result</th><th>P&amp;L</th></tr></thead>
+    <thead><tr><th>Time</th><th class="hm">Mode</th><th>Market</th><th>Call</th><th class="hm">Bought</th><th class="hm">Qty</th><th class="hm">Price</th><th class="hm">Odds</th><th class="hm">Time left</th><th>Result</th><th>P&amp;L</th></tr></thead>
     <tbody id="trades"></tbody>
   </table></div>
 
   <h2>Health</h2>
   <div class="card"><div id="feeds" class="muted"></div><div id="errors" class="errors" style="margin-top:10px"></div></div>
-  <p class="muted" style="font-size:12px;margin-top:22px">Not financial advice. Paper results assume fills at the ask plus 1¢ and can overstate real performance.</p>
+  <p style="margin-top:18px"><a class="link" href="/logout">Sign out</a></p>
+  <p class="muted" style="font-size:12px;margin-top:8px">Not financial advice. Paper results assume fills at the ask plus 1¢ and can overstate real performance.</p>
 </div>
 
 <script>
@@ -133,6 +160,9 @@ const cls = v => v>0?'pos':(v<0?'neg':'');
 const esc = s => String(s??'').replace(/[&<>"]/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 const num = (v,d=2) => v==null?'—':Number(v).toLocaleString(undefined,{minimumFractionDigits:d,maximumFractionDigits:d});
 const mmss = s => { s=Math.max(0,Math.round(s)); return Math.floor(s/60)+':'+String(s%60).padStart(2,'0'); };
+const openGates = new Set();
+document.addEventListener('toggle', e => { const a = e.target.dataset && e.target.dataset.asset;
+  if (a) e.target.open ? openGates.add(a) : openGates.delete(a); }, true);
 let killed=false, cards=[], skew=0, cfg={entry_start:7.5, entry_end:2};
 
 function cardHTML(c){
@@ -199,7 +229,11 @@ function tick(){
 
 async function load(){
   let s;
-  try{ s = await (await fetch('/api/state')).json(); }catch(e){ $('age').textContent='dashboard offline'; return; }
+  try{
+    const res = await fetch('/api/state', {cache:'no-store'});
+    if (res.status === 401){ location.href = '/login'; return; }
+    s = await res.json();
+  }catch(e){ $('age').textContent='connection lost — retrying'; $('health').classList.add('stale'); return; }
   skew = s.server_ts - Date.now()/1000;
   cfg = Object.assign(cfg, s.settings||{});
   const age = s.ts ? Math.round(s.server_ts - s.ts) : null;
@@ -235,21 +269,22 @@ async function load(){
   $('gates').innerHTML = Object.keys(g).length ? Object.entries(g).map(([a,x])=>{
     const ok = x.checks.filter(c=>c.ok).length, n = x.checks.length;
     const chip = x.passed ? '<span class="chip ok">APPROVED</span>' : `<span class="chip no">${ok} / ${n} PASSED</span>`;
-    return `<div class="card"><div class="gate-head"><b>${esc(a)}</b>${chip}</div>
-      <div class="bar"><div style="width:${100*ok/n}%"></div></div>
+    const open = innerWidth >= 600 || openGates.has(a) ? ' open' : '';
+    return `<details class="card gate" data-asset="${esc(a)}"${open}><summary><div class="gate-head"><b>${esc(a)}</b>${chip}</div>
+      <div class="bar"><div style="width:${100*ok/n}%"></div></div></summary>
       ${x.checks.map(c=>`<div class="check"><span><span class="tick ${c.ok?'pos':'neg'}">${c.ok?'✓':'✗'}</span>${esc(c.name)}</span>
-        <span class="v">${esc(c.value)} <span class="muted">/ ${esc(c.target)}</span></span></div>`).join('')}</div>`;
+        <span class="v">${esc(c.value)} <span class="muted">/ ${esc(c.target)}</span></span></div>`).join('')}</details>`;
   }).join('') : '<div class="card empty">Waiting for first scan…</div>';
 
   const t = s.recent||[];
   $('trades').innerHTML = t.length ? t.map(r=>`<tr>
-    <td>${new Date(r.ts*1000).toLocaleString([], {month:'short',day:'numeric',hour:'numeric',minute:'2-digit'})}</td>
-    <td><span class="tag ${r.mode==='live'?'live':''}">${r.mode.toUpperCase()}</span></td>
-    <td><b>${esc(r.asset)}</b></td>
+    <td>${new Date(r.ts*1000).toLocaleString([], (innerWidth<600?{hour:'numeric',minute:'2-digit'}:{month:'short',day:'numeric',hour:'numeric',minute:'2-digit'}))}</td>
+    <td class="hm"><span class="tag ${r.mode==='live'?'live':''}">${r.mode.toUpperCase()}</span></td>
+    <td><b>${esc(r.asset)}</b>${r.mode==='live'?' <span class="tag live">LIVE</span>':''}</td>
     <td class="${r.direction==='UP'?'up':(r.direction==='DOWN'?'down':'')}">${r.direction==='UP'?'▲ UP':(r.direction==='DOWN'?'▼ DOWN':'—')}</td>
-    <td>${r.side.toUpperCase()}</td><td>${r.contracts}</td><td>${r.price.toFixed(2)}</td>
-    <td>${r.fair==null?'—':((r.side==='yes'?r.fair:1-r.fair)*100).toFixed(0)+'%'}</td>
-    <td>${r.minutes_left==null?'—':mmss(r.minutes_left*60)}</td>
+    <td class="hm">${r.side.toUpperCase()}</td><td class="hm">${r.contracts}</td><td class="hm">${r.price.toFixed(2)}</td>
+    <td class="hm">${r.fair==null?'—':((r.side==='yes'?r.fair:1-r.fair)*100).toFixed(0)+'%'}</td>
+    <td class="hm">${r.minutes_left==null?'—':mmss(r.minutes_left*60)}</td>
     <td><span class="tag ${r.status}">${r.status.toUpperCase()}</span></td>
     <td class="${cls(r.pnl)}">${r.pnl==null?'—':money(r.pnl)}</td></tr>`).join('')
     : '<tr><td colspan="11" class="empty">No trades yet.</td></tr>';
@@ -265,10 +300,13 @@ async function load(){
 async function toggleKill(){
   if (!killed && !confirm('Stop all live trading now?')) return;
   if (killed && !confirm('Resume live trading? Gates and risk limits still apply.')) return;
-  await fetch(killed?'/api/resume':'/api/kill',{method:'POST'});
+  const res = await fetch(killed?'/api/resume':'/api/kill',{method:'POST'});
+  if (res.status === 401){ location.href = '/login'; return; }
   load();
 }
 load(); setInterval(load, 5000); setInterval(tick, 1000);
+document.addEventListener('visibilitychange', () => { if (!document.hidden) load(); });   // refresh when phone app reopens
+if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(()=>{});
 </script>
 </body>
 </html>

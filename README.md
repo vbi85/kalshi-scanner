@@ -44,17 +44,24 @@ Gates are re-checked every cycle. An asset that starts failing drops back to pap
 
 ## Deploy on DigitalOcean
 1. Create a GitHub repo (private) and push this folder.
-2. Create an Ubuntu 24.04 droplet ($6/mo basic is enough).
+2. Create an Ubuntu 24.04 droplet ($6/mo, 1 GiB, New York region).
 3. SSH in as root:
    ```bash
    git clone https://github.com/<you>/kalshi-scanner.git && cd kalshi-scanner
    bash deploy/setup_droplet.sh
-   nano /opt/kalshi-scanner/.env      # set DASH_PASSWORD, alerts, etc.
-   systemctl restart kalshi-engine kalshi-dashboard
    ```
-4. Open `http://<droplet-ip>:8080`.
+   It prints your dashboard address (`https://<ip-with-dashes>.sslip.io`), username and a generated password.
+   Free HTTPS is set up automatically with Caddy. Port 8080 is not exposed to the internet.
+4. Edit `/opt/kalshi-scanner/.env` for text alerts, then `systemctl restart kalshi-engine kalshi-dashboard`.
 5. Updates later: `bash /opt/kalshi-scanner/deploy/update.sh`
 6. Logs: `journalctl -u kalshi-engine -f`
+
+## Put it on your phone
+**iPhone (Safari):** open the dashboard address → sign in → Share button → **Add to Home Screen**.
+**Android (Chrome):** open the dashboard address → sign in → ⋮ menu → **Install app** (or Add to Home screen).
+
+It opens full-screen like a normal app, stays signed in for 30 days, and refreshes every 5 seconds.
+Text alerts reach you even when the app is closed.
 
 ## Text alerts
 - **Free:** Gmail → carrier text gateway. Set `ALERT_METHOD=email_sms`, a Gmail App Password, and
