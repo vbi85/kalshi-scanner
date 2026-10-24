@@ -1,5 +1,13 @@
-"""Main loop: discover markets -> price them -> paper trade every signal ->
-live trade only assets that passed every approval gate -> settle -> publish state."""
+"""Main loop for the 15-minute UP/DOWN bot.
+
+Every cycle, for each market (BTC, Gold, Oil):
+  1. Read the current 15-minute window: target price, time left, Kalshi prices.
+  2. Measure momentum over the last 5 minutes -> predict UP or DOWN.
+  3. Price the odds of that direction winning (momentum-adjusted).
+  4. Only between 7:30 and 2:00 left: if momentum is strong, still pushing, and the odds
+     beat Kalshi's price after fees -> TRADE (paper always; live only if gates passed).
+  5. Max one trade per asset per window. Settle results, update gates, publish to dashboard.
+"""
 import math
 import os
 import time
@@ -11,7 +19,7 @@ from . import db, gates
 from .alerts import Alerter
 from .config import ASSETS, Config
 from .kalshi import KalshiPublic, KalshiTrader, parse_time, quote
-from .model import edges, fair_yes, taker_fee
+from .model import edges, fair_yes, momentum, taker_fee, up_side
 from .prices import get_price
 
 TZ = ZoneInfo(os.getenv("TZ_NAME", "America/Chicago"))
@@ -31,6 +39,11 @@ def strike_text(m):
 def day_start_ts():
     now = datetime.now(TZ)
     return now.replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
+
+
+def mmss(minutes):
+    s = max(0, int(round(minutes * 60)))
+    return f"{s // 60}:{s % 60:02d}"
 
 
 class Engine:
@@ -70,7 +83,7 @@ class Engine:
         start = day_start_ts()
         rows = self.c.execute("SELECT * FROM trades WHERE mode='live' AND ts>=?", (start,)).fetchall()
         realized = sum(r["pnl"] or 0 for r in rows if r["status"] in ("won", "lost"))
-        open_rows = [r for r in self.c.execute("SELECT * FROM trades WHERE mode='live' AND status='open'")]
+        open_rows = self.c.execute("SELECT * FROM trades WHERE mode='live' AND status='open'").fetchall()
         open_cost = sum(r["price"] * r["contracts"] + r["fee"] for r in open_rows)
         if realized <= -self.cfg.max_daily_loss:
             self.kill(f"daily loss limit ${self.cfg.max_daily_loss:g} hit")
@@ -102,7 +115,7 @@ class Engine:
         if found:
             self.series = found
             self.last_discover = time.time()
-            print(f"[engine] scanning {len(found)} series: {', '.join(sorted(found))}")
+            print(f"[engine] watching {len(found)} markets: {', '.join(sorted(found))}")
 
     def prices(self):
         out = {}
@@ -116,52 +129,89 @@ class Engine:
         close = parse_time(m.get("close_time"))
         mins = (close - datetime.now(timezone.utc)).total_seconds() / 60 if close else None
         q = quote(m)
-        row = {"asset": info["asset"], "series": series_ticker,
-               "ticker": m["ticker"], "strike": strike_text(m), "minutes_left": mins,
-               "yes_ask": q["yes_ask"], "no_ask": q["no_ask"], "spot": px["price"] if px else None,
-               "fair": None, "side": None, "edge": None, "signal": False, "note": ""}
-        if mins is None or mins < cfg.min_minutes_to_close:
-            row["note"] = "too close to expiry"; return row
+        usd = up_side(m)
+        target = m.get("floor_strike") if usd == "yes" else m.get("cap_strike")
+        pos = db.window_trade(self.c, "paper", m["ticker"])
+        row = {"asset": info["asset"], "series": series_ticker, "ticker": m["ticker"],
+               "strike": strike_text(m), "target": target,
+               "close_ts": close.timestamp() if close else None, "minutes_left": mins,
+               "spot": px["price"] if px else None, "yes_ask": q["yes_ask"], "no_ask": q["no_ask"],
+               "direction": None, "mom_z": None, "conf": None, "fair": None, "fair_base": None,
+               "side": None, "price": None, "size": None, "edge": None,
+               "status": "WAITING", "note": "", "signal": False,
+               "position": ({"side": pos["side"], "price": pos["price"], "status": pos["status"],
+                             "pnl": pos["pnl"]} if pos else None)}
+
+        def blocked(note):
+            row["status"] = "IN TRADE" if pos else "BLOCKED"
+            row["note"] = note
+            return row
+
+        if mins is None:
+            return blocked("no close time")
+        if usd is None:
+            return blocked("not an up/down market")
+        if target is None:
+            return blocked("target price not set yet")
         if not px or not px.get("sigma_1m"):
-            row["note"] = "no price feed"; return row
-        max_age = max(cfg.max_price_age_sec, mins * 60 * 0.05)
-        if px["age_sec"] > max_age:
-            row["note"] = f"price {px['age_sec']/60:.0f}m old"; return row
-        fair = fair_yes(m, px["price"], px["sigma_1m"], mins, cfg.vol_mult)
+            return blocked("price feed down")
+        if px["age_sec"] > cfg.max_price_age_sec:
+            return blocked(f"price {px['age_sec'] / 60:.0f} min delayed — unsafe")
+        mom = momentum(px["price"], px.get("closes"), px["sigma_1m"], cfg.mom_lookback_min)
+        if not mom:
+            return blocked("not enough price history")
+
+        drift = cfg.mom_weight * mom["drift_1m"]
+        fair = fair_yes(m, px["price"], px["sigma_1m"], mins, cfg.vol_mult, drift)
+        base = fair_yes(m, px["price"], px["sigma_1m"], mins, cfg.vol_mult, 0.0)
         if fair is None:
-            row["note"] = "strike type not modeled"; return row
-        row["fair"] = fair
-        e = edges(fair, q, info.get("fee_multiplier", 1.0), cfg.slippage)
-        if not e:
-            row["note"] = "no offers"; return row
-        side = max(e, key=e.get)
-        price = q[f"{side}_ask"]
-        size = q[f"{side}_ask_size"]
-        row.update(side=side, edge=e[side], price=price, size=size)
-        if not (cfg.min_price <= price <= cfg.max_price):
-            row["note"] = "price outside range"
-        elif size < cfg.min_ask_size:
-            row["note"] = "thin book"
-        elif e[side] < cfg.min_edge:
-            row["note"] = "edge too small"
+            return blocked("cannot price this market")
+        side = usd if mom["dir"] == "UP" else ("no" if usd == "yes" else "yes")
+        e = edges(fair, q, info.get("fee_multiplier", 1.0), cfg.slippage).get(side)
+        row.update(direction=mom["dir"], mom_z=mom["z"], fair=fair, fair_base=base, side=side,
+                   conf=fair if side == "yes" else 1 - fair,
+                   price=q[f"{side}_ask"] or None, size=q[f"{side}_ask_size"], edge=e)
+
+        if pos:
+            row["status"], row["note"] = "IN TRADE", f"holding {pos['side'].upper()} @ {pos['price']:.2f}"
+        elif mins > cfg.entry_start_min:
+            row["status"], row["note"] = "WAITING", f"trading opens in {mmss(mins - cfg.entry_start_min)}"
+        elif mins < cfg.entry_end_min:
+            row["status"], row["note"] = "CLOSED", f"no new trades under {mmss(cfg.entry_end_min)}"
+        elif abs(mom["z"]) < cfg.mom_min_z:
+            row["status"], row["note"] = "SETUP FORMING", f"momentum weak ({abs(mom['z']):.2f} / {cfg.mom_min_z:g})"
+        elif mom["r1"] * mom["drift_1m"] < 0:
+            row["status"], row["note"] = "SETUP FORMING", "momentum fading — last minute reversed"
+        elif e is None or not row["price"]:
+            row["status"], row["note"] = "SETUP FORMING", "no sellers on that side"
+        elif not (cfg.min_price <= row["price"] <= cfg.max_price):
+            row["status"], row["note"] = "SETUP FORMING", f"price {row['price']:.2f} outside {cfg.min_price:g}–{cfg.max_price:g}"
+        elif row["size"] < cfg.min_ask_size:
+            row["status"], row["note"] = "SETUP FORMING", "too few contracts offered"
+        elif e < cfg.min_edge:
+            row["status"], row["note"] = "SETUP FORMING", f"price too high for the odds (edge {e:+.2f})"
         else:
-            row["signal"] = True
+            row["status"], row["signal"] = "TRADE", True
+            row["note"] = f"{mom['dir']} setup confirmed, edge {e:+.2f}"
         return row
 
     def act(self, r, info):
         fee_mult = info.get("fee_multiplier", 1.0)
         base = dict(ts=time.time(), asset=r["asset"], series=r["series"], ticker=r["ticker"], side=r["side"],
-                    fair=round(r["fair"], 4), edge=round(r["edge"], 4), minutes_left=round(r["minutes_left"], 2),
-                    spot=r["spot"], strike=r["strike"])
-        price = round(min(0.99, r["price"] + self.cfg.slippage), 4)  # paper assumes 1c worse fill
-        new_paper = not db.has_position(self.c, "paper", r["ticker"]) and db.record_trade(self.c, mode="paper", price=price, contracts=1,
-                                    fee=taker_fee(price, 1, fee_mult), **base)
-        if new_paper:
-            mode = "LIVE" if self.live_enabled(r["asset"]) else "paper"
-            self.alerts.send(f"{r['asset']} {r['side'].upper()} @{r['price']:.2f} fair {r['fair']:.2f} "
-                             f"edge +{r['edge']:.2f} | {r['minutes_left']:.0f}m left | {r['strike']} [{mode}]",
-                             key=f"{r['ticker']}:{r['side']}")
-        if not self.live_enabled(r["asset"]) or db.has_position(self.c, "live", r["ticker"]):
+                    fair=round(r["fair"], 4), fair_base=round(r["fair_base"], 4), direction=r["direction"],
+                    mom_z=round(r["mom_z"], 3), close_ts=r["close_ts"], edge=round(r["edge"], 4),
+                    minutes_left=round(r["minutes_left"], 2), spot=r["spot"], strike=r["strike"])
+        live = self.live_enabled(r["asset"])
+        if not db.has_window(self.c, "paper", r["asset"], r["close_ts"]):
+            price = round(min(0.99, r["price"] + self.cfg.slippage), 4)  # paper assumes 1c worse fill
+            if db.record_trade(self.c, mode="paper", price=price, contracts=1,
+                               fee=taker_fee(price, 1, fee_mult), **base):
+                arrow = "▲" if r["direction"] == "UP" else "▼"
+                self.alerts.send(f"{arrow} {r['asset']} {r['direction']}: buy {r['side'].upper()} @{r['price']:.2f} | "
+                                 f"odds {r['conf'] * 100:.0f}% | {mmss(r['minutes_left'])} left | "
+                                 f"target {r['target']:,} now {r['spot']:,.2f} [{'LIVE' if live else 'paper'}]",
+                                 key=f"{r['asset']}:{r['close_ts']}")
+        if not live or db.has_window(self.c, "live", r["asset"], r["close_ts"]):
             return
         cfg = self.cfg
         n = int(min(cfg.max_contracts_per_trade, math.floor(cfg.max_dollars_per_trade / r["price"]), r["size"]))
@@ -170,7 +220,7 @@ class Engine:
         cost = n * r["price"] + taker_fee(r["price"], n, fee_mult)
         ok, why = self.live_risk_ok(cost)
         if not ok:
-            r["note"] = f"live blocked: {why}"
+            r["note"] += f" · live blocked: {why}"
             return
         try:
             fill = self.trader.buy(r["ticker"], r["side"], r["price"], n)
@@ -180,10 +230,10 @@ class Engine:
         if fill["filled"] >= 1:
             db.record_trade(self.c, mode="live", price=fill["fill_price"], contracts=fill["filled"],
                             fee=round(fill["fee"], 4), order_id=fill["order_id"], **base)
-            self.alerts.send(f"LIVE FILLED: {r['asset']} {r['side'].upper()} {fill['filled']:.0f} @ "
-                             f"{fill['fill_price']:.2f} | {r['ticker']}", force=True)
+            self.alerts.send(f"LIVE FILLED: {r['asset']} {r['direction']} {r['side'].upper()} "
+                             f"{fill['filled']:.0f} @ {fill['fill_price']:.2f}", force=True)
         else:
-            r["note"] = "live order not filled (price moved)"
+            r["note"] += " · live order not filled (price moved)"
 
     def settle_open(self):
         open_t = db.open_trades(self.c)
@@ -202,7 +252,11 @@ class Engine:
             res = (m.get("result") or "").lower()
             if res in ("yes", "no"):
                 db.settle(self.c, t["id"], res)
-            elif m.get("status") in ("finalized", "settled") and res not in ("yes", "no"):
+                won = res == t["side"]
+                if t["mode"] == "live":
+                    self.alerts.send(f"LIVE {'WON' if won else 'LOST'}: {t['asset']} {t['direction'] or ''} "
+                                     f"{t['side'].upper()} @{t['price']:.2f}", force=True)
+            elif m.get("status") in ("finalized", "settled"):
                 db.void(self.c, t["id"])
         self.check_loss_streak()
 
@@ -225,7 +279,15 @@ class Engine:
                 balance = self.trader.balance()
             except Exception as e:
                 self.err(f"balance: {e}")
-        rows = sorted(rows, key=lambda r: (not r["signal"], -(r["edge"] if r["edge"] is not None else -9)))
+        # one card per asset: the window closing soonest
+        cards = {}
+        for r in sorted(rows, key=lambda r: r["minutes_left"] if r["minutes_left"] is not None else 99):
+            cards.setdefault(r["asset"], r)
+        for asset in sorted({v["asset"] for v in self.series.values()}):
+            cards.setdefault(asset, {"asset": asset, "status": "NO MARKET",
+                                     "note": "no 15-min window open (market hours?)",
+                                     "spot": (prices.get(asset) or {}).get("price")})
+        order = {"BTC": 0, "GOLD": 1, "WTI": 2}
         db.put(self.c, "state", {
             "ts": time.time(),
             "mode": self.cfg.trading_mode,
@@ -234,15 +296,14 @@ class Engine:
             "killed": self.killed(),
             "kill_reason": db.get(self.c, "kill_reason", ""),
             "balance": balance,
-            "series": {k: v["asset"] for k, v in self.series.items()},
-            "prices": {a: ({"price": p["price"], "age_sec": round(p["age_sec"]), "sigma_1m": p["sigma_1m"]} if p else None)
-                       for a, p in prices.items()},
+            "cards": sorted(cards.values(), key=lambda c: order.get(c["asset"], 9)),
             "gates": self.gate_status,
-            "opportunities": rows[:40],
+            "prices": {a: ({"price": p["price"], "age_sec": round(p["age_sec"])} if p else None)
+                       for a, p in prices.items()},
             "errors": self.errors,
-            "settings": {"min_edge": self.cfg.min_edge, "max_contracts": self.cfg.max_contracts_per_trade,
-                         "max_dollars": self.cfg.max_dollars_per_trade, "max_daily_loss": self.cfg.max_daily_loss,
-                         "poll_seconds": self.cfg.poll_seconds},
+            "settings": {"entry_start": self.cfg.entry_start_min, "entry_end": self.cfg.entry_end_min,
+                         "min_edge": self.cfg.min_edge, "mom_min_z": self.cfg.mom_min_z,
+                         "max_dollars": self.cfg.max_dollars_per_trade, "max_daily_loss": self.cfg.max_daily_loss},
         })
 
     def cycle(self):
@@ -267,7 +328,7 @@ class Engine:
 
     def run(self):
         print(f"[engine] mode={self.cfg.trading_mode} demo={self.cfg.demo} live_ready={self.trader is not None}")
-        self.alerts.send(f"Scanner started ({self.cfg.trading_mode} mode).", force=True)
+        self.alerts.send(f"Kalshi bot started ({self.cfg.trading_mode} mode).", force=True)
         while True:
             t0 = time.time()
             try:

@@ -11,7 +11,9 @@ CREATE TABLE IF NOT EXISTS trades (
     mode TEXT NOT NULL,              -- paper | live
     asset TEXT, series TEXT, ticker TEXT NOT NULL, side TEXT NOT NULL,
     price REAL NOT NULL,             -- entry price per contract
-    fair REAL, edge REAL, minutes_left REAL, spot REAL, strike TEXT,
+    fair REAL, fair_base REAL,       -- fair = with momentum, fair_base = without (proves momentum's value)
+    direction TEXT, mom_z REAL, close_ts REAL,
+    edge REAL, minutes_left REAL, spot REAL, strike TEXT,
     contracts REAL NOT NULL DEFAULT 1,
     fee REAL NOT NULL DEFAULT 0,
     order_id TEXT,
@@ -57,6 +59,17 @@ def record_trade(c, **t):
 
 def has_position(c, mode, ticker):
     return c.execute("SELECT 1 FROM trades WHERE mode=? AND ticker=?", (mode, ticker)).fetchone() is not None
+
+
+def has_window(c, mode, asset, close_ts):
+    """One trade per asset per 15-minute window."""
+    return c.execute("SELECT 1 FROM trades WHERE mode=? AND asset=? AND close_ts=?",
+                     (mode, asset, close_ts)).fetchone() is not None
+
+
+def window_trade(c, mode, ticker):
+    r = c.execute("SELECT * FROM trades WHERE mode=? AND ticker=? ORDER BY ts DESC LIMIT 1", (mode, ticker)).fetchone()
+    return dict(r) if r else None
 
 
 def open_trades(c):

@@ -1,19 +1,24 @@
-# Kalshi Scanner
+# Kalshi 15-Min Bot
 
-Scans Kalshi's BTC 15-minute markets plus gold, silver, WTI oil and natural gas markets.
-Every signal is paper-traded. **Live auto-trading unlocks per asset only after that asset
+Predicts UP or DOWN on Kalshi's 15-minute BTC, Gold and WTI Oil markets and trades the setup.
+Every trade is paper-traded first. **Live auto-trading unlocks per market only after that market
 passes every approval gate**, and stays inside hard risk caps. Text alerts + black dashboard.
 
 Not financial advice. Paper results can overstate real results.
 
-## How it decides
-1. Pulls open Kalshi markets closing within 60 minutes (public API, no key).
-2. Gets the live underlying price (Coinbase for BTC; Yahoo futures for metals/energy).
-3. Calculates fair odds from current price, strike, time left, and recent volatility.
-4. Signal = fair odds beat the ask by at least `MIN_EDGE` after Kalshi fees and 1¢ slippage.
-5. Rejects stale prices, thin books, and prices under 5¢ or over 90¢.
+## How it decides (each 15-minute window)
+1. Reads the window: target price, time left, Kalshi's YES/NO prices.
+2. Measures momentum over the last 5 minutes → **UP** or **DOWN**.
+3. Prices the odds of that direction winning (distance to target, time left, volatility, momentum).
+4. **Waits until 7:30 remains.** Between 7:30 and 2:00 it trades only if:
+   - momentum is strong (≥ 0.5 std devs) and the last minute still agrees,
+   - the odds beat Kalshi's price by ≥ 5¢ after fees and 1¢ slippage,
+   - price is 5¢–90¢, enough contracts offered, underlying price is live (not delayed).
+5. One trade per market per window. Never trades against momentum.
 
-## Approval gates (all must pass, per asset)
+Dashboard card statuses: WAITING → SETUP FORMING → TRADE → IN TRADE, or CLOSED / BLOCKED.
+
+## Approval gates (all must pass, per market)
 | Gate | Default |
 |---|---|
 | Settled paper trades | ≥ 150 |
@@ -22,7 +27,11 @@ Not financial advice. Paper results can overstate real results.
 | Profit factor | ≥ 1.25 |
 | Win rate beats market-implied odds | ≥ +3 points |
 | Max drawdown (1-contract units) | ≤ $15 |
+| Momentum improves predictions vs. no-momentum model | Brier score lower |
 | Last 50 trades profitable | > $0 |
+
+Gold and Oil use free Yahoo prices, which are often delayed. The bot blocks trades on delayed prices,
+so those markets may never unlock without a paid real-time feed.
 
 Gates are re-checked every cycle. An asset that starts failing drops back to paper automatically.
 
@@ -49,7 +58,7 @@ Gates are re-checked every cycle. An asset that starts failing drops back to pap
 
 ## Text alerts
 - **Free:** Gmail → carrier text gateway. Set `ALERT_METHOD=email_sms`, a Gmail App Password, and
-  `SMS_GATEWAY_TO` (Verizon `@vtext.com`, T-Mobile `@tmomail.net`). AT&T no longer supports this.
+  `SMS_GATEWAY_TO` (Verizon `@vtext.com`, T-Mobile `@tmomail.net` — e.g. `4145551234@tmomail.net`). AT&T no longer supports this.
 - **Any carrier:** Twilio (~1¢/text). Set `ALERT_METHOD=twilio` and the four `TWILIO_*` values.
 
 ## Going live (only after gates are green)

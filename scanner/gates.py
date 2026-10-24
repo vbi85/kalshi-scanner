@@ -37,6 +37,17 @@ def evaluate(trades, cfg, recent_n=None):
     recent_n = recent_n or cfg.gate_recent_n
     recent_pnl = sum(t["pnl"] for t in trades[-recent_n:]) if trades else 0.0
     calib = (s["win_rate"] - s["avg_price"]) * 100   # do we win more often than the price implies?
+    # Brier score (lower = better forecasts): does adding momentum beat the plain model?
+    scored = [t for t in trades if t.get("fair") is not None and t.get("fair_base") is not None]
+
+    def brier(key):
+        out = []
+        for t in scored:
+            p_win = t[key] if t["side"] == "yes" else 1 - t[key]
+            out.append((p_win - (1 if t["status"] == "won" else 0)) ** 2)
+        return sum(out) / len(out) if out else None
+    b_mom, b_base = brier("fair"), brier("fair_base")
+    mom_ok = b_mom is not None and b_mom <= b_base
     checks = [
         {"name": "Enough trades", "value": f'{s["n"]}', "target": f'≥ {cfg.gate_min_trades}',
          "ok": s["n"] >= cfg.gate_min_trades},
@@ -50,6 +61,9 @@ def evaluate(trades, cfg, recent_n=None):
          "ok": calib >= cfg.gate_min_calibration_pts},
         {"name": "Max drawdown", "value": f'${s["max_dd"]:.2f}', "target": f'≤ ${cfg.gate_max_drawdown:g}',
          "ok": s["n"] > 0 and s["max_dd"] <= cfg.gate_max_drawdown},
+        {"name": "Momentum improves predictions",
+         "value": "—" if b_mom is None else f"{b_mom:.3f}", "target": "—" if b_base is None else f"≤ {b_base:.3f}",
+         "ok": mom_ok},
         {"name": f"Last {recent_n} trades profitable", "value": f'${recent_pnl:.2f}', "target": "> $0",
          "ok": recent_pnl > 0},
     ]

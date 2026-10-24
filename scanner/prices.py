@@ -1,5 +1,6 @@
 """Underlying price feeds. Each returns {"price", "age_sec", "sigma_1m"} or None.
 
+closes   = last 1-minute closing prices, oldest first (used for momentum).
 sigma_1m = standard deviation of 1-minute log returns over the lookback window.
 age_sec  = how old the latest price is. Old prices are rejected by the engine.
 """
@@ -26,7 +27,7 @@ def coinbase(symbol, lookback_min, session=None):
               params={"granularity": 60}, headers=UA, timeout=8).json()
     # candles: [time, low, high, open, close, volume], newest first
     closes = [row[4] for row in reversed(c[:lookback_min + 1])]
-    return {"price": float(t["price"]), "age_sec": 0.0, "sigma_1m": _sigma(closes)}
+    return {"price": float(t["price"]), "age_sec": 0.0, "sigma_1m": _sigma(closes), "closes": closes}
 
 
 def yahoo(symbol, lookback_min, session=None):
@@ -40,7 +41,8 @@ def yahoo(symbol, lookback_min, session=None):
     if not price:
         return None
     age = time.time() - float(meta.get("regularMarketTime", 0))
-    return {"price": float(price), "age_sec": age, "sigma_1m": _sigma(closes[-(lookback_min + 1):])}
+    closes = closes[-(lookback_min + 1):]
+    return {"price": float(price), "age_sec": age, "sigma_1m": _sigma(closes), "closes": closes}
 
 
 FEEDS = {"coinbase": coinbase, "yahoo": yahoo}

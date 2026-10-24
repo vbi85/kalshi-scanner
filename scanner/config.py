@@ -33,16 +33,20 @@ class Config:
     private_key_path: str = _env("KALSHI_PRIVATE_KEY_PATH", "")
 
     # ---------- What to scan ----------
-    series: list = field(default_factory=lambda: _list("SERIES", "KXBTC15M,KXWTI15M"))
-    auto_discover: bool = _bool("AUTO_DISCOVER", "true")
+    series: list = field(default_factory=lambda: _list("SERIES", "KXBTC15M,KXGOLD15M,KXWTI15M"))
+    auto_discover: bool = _bool("AUTO_DISCOVER", "false")
     discover_categories: list = field(default_factory=lambda: _list("DISCOVER_CATEGORIES", "Crypto,Commodities"))
     discover_every_min: int = int(_env("DISCOVER_EVERY_MIN", "30"))
 
     # ---------- Signal rules ----------
-    poll_seconds: int = int(_env("POLL_SECONDS", "20"))
-    max_minutes_to_close: float = float(_env("MAX_MINUTES_TO_CLOSE", "60"))
-    min_minutes_to_close: float = float(_env("MIN_MINUTES_TO_CLOSE", "1.5"))
-    min_edge: float = float(_env("MIN_EDGE", "0.06"))           # $ per contract after fees + slippage
+    poll_seconds: int = int(_env("POLL_SECONDS", "10"))
+    max_minutes_to_close: float = float(_env("MAX_MINUTES_TO_CLOSE", "16"))  # show the current 15-min window
+    entry_start_min: float = float(_env("ENTRY_START_MIN", "7.5"))  # no trades until 7:30 or less remains
+    entry_end_min: float = float(_env("ENTRY_END_MIN", "2.0"))      # no new trades under 2:00
+    mom_lookback_min: int = int(_env("MOM_LOOKBACK_MIN", "5"))      # momentum measured over last 5 min
+    mom_min_z: float = float(_env("MOM_MIN_Z", "0.5"))              # minimum momentum strength (std devs)
+    mom_weight: float = float(_env("MOM_WEIGHT", "0.25"))           # how much momentum carries forward
+    min_edge: float = float(_env("MIN_EDGE", "0.05"))           # $ per contract after fees + slippage
     min_ask_size: float = float(_env("MIN_ASK_SIZE", "5"))
     min_price: float = float(_env("MIN_PRICE", "0.05"))         # skip lottery tickets
     max_price: float = float(_env("MAX_PRICE", "0.90"))         # skip pennies-in-front-of-steamroller
@@ -101,10 +105,8 @@ class Config:
 # Underlying price feed per asset. Patterns match "<series ticker> <series title>" in lower case.
 ASSETS = {
     "BTC":    {"patterns": [r"\bbitcoin\b", r"\bkxbtc"],                          "feed": "coinbase", "symbol": "BTC-USD"},
-    "GOLD":   {"patterns": [r"\bgold\b"],                                         "feed": "yahoo",    "symbol": "GC=F"},
-    "SILVER": {"patterns": [r"\bsilver\b"],                                       "feed": "yahoo",    "symbol": "SI=F"},
+    "GOLD":   {"patterns": [r"\bgold\b", r"\bkxgold"],                                         "feed": "yahoo",    "symbol": "GC=F"},
     "WTI":    {"patterns": [r"\bwti\b", r"\bkxwti", r"\bcrude\b"],                "feed": "yahoo",    "symbol": "CL=F"},
-    "NATGAS": {"patterns": [r"\bnatural gas\b", r"\bkxnatgas", r"\bhenry hub\b"], "feed": "yahoo",    "symbol": "NG=F"},
 }
 
 EXCLUDE_PATTERNS = [r"\bethereum\b", r"\bkxeth", r"\bsolana\b", r"\bxrp\b", r"\bdoge", r"\bbrent\b",
