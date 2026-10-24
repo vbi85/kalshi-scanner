@@ -1,0 +1,13 @@
+[Unit]
+Description=Kalshi scanner engine
+After=network-online.target
+
+[Service]
+User=scanner
+WorkingDirectory=/opt/kalshi-scanner
+ExecStart=/opt/kalshi-scanner/.venv/bin/python -u -m scanner.engine
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

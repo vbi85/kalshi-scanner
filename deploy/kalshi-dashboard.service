@@ -1,0 +1,13 @@
+[Unit]
+Description=Kalshi scanner dashboard
+After=network-online.target
+
+[Service]
+User=scanner
+WorkingDirectory=/opt/kalshi-scanner
+ExecStart=/opt/kalshi-scanner/.venv/bin/gunicorn -w 1 -b 0.0.0.0:8080 dashboard.app:app
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,5 @@
+requests>=2.31
+flask>=3.0
+gunicorn>=22.0
+cryptography>=42.0
+python-dotenv>=1.0

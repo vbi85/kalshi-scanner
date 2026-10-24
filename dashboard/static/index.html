@@ -1,0 +1,187 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Kalshi Scanner</title>
+<style>
+  :root{
+    --bg:#000; --card:#0b0b0c; --line:#1d1d20; --text:#ededed; --dim:#8a8a90;
+    --green:#22c55e; --red:#ef4444; --amber:#f5b301; --blue:#3b82f6;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--text);font:15px/1.45 -apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif}
+  .wrap{max-width:1280px;margin:0 auto;padding:16px}
+  header{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:16px}
+  h1{font-size:20px;margin:0;letter-spacing:.3px}
+  h2{font-size:13px;text-transform:uppercase;letter-spacing:1.2px;color:var(--dim);margin:26px 0 10px;font-weight:600}
+  .badge{padding:5px 12px;border-radius:999px;font-weight:700;font-size:13px;letter-spacing:.5px}
+  .b-paper{background:#1a1a1d;color:var(--amber);border:1px solid #3a3000}
+  .b-live{background:#06240f;color:var(--green);border:1px solid #0f5a26}
+  .b-kill{background:#2a0606;color:var(--red);border:1px solid #6b1010}
+  .spacer{flex:1}
+  .pulse{width:10px;height:10px;border-radius:50%;background:var(--green);display:inline-block;margin-right:6px}
+  .stale .pulse{background:var(--red)}
+  .muted{color:var(--dim)}
+  button{font:inherit;font-weight:700;border-radius:10px;padding:10px 18px;border:0;cursor:pointer}
+  .kill{background:var(--red);color:#fff}
+  .resume{background:#1f1f22;color:var(--text);border:1px solid #333}
+  a.btn{display:inline-block;background:#1f1f22;color:var(--text);border:1px solid #333;border-radius:10px;padding:9px 16px;text-decoration:none;font-weight:600}
+  .grid{display:grid;gap:12px}
+  .kpis{grid-template-columns:repeat(auto-fit,minmax(170px,1fr))}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:16px}
+  .kpi .label{color:var(--dim);font-size:12px;text-transform:uppercase;letter-spacing:1px}
+  .kpi .val{font-size:28px;font-weight:700;margin-top:4px;font-variant-numeric:tabular-nums}
+  .kpi .sub{color:var(--dim);font-size:13px;margin-top:2px}
+  .pos{color:var(--green)} .neg{color:var(--red)}
+  .gates{grid-template-columns:repeat(auto-fit,minmax(260px,1fr))}
+  .gate-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:10px}
+  .gate-head b{font-size:18px}
+  .chip{font-size:12px;font-weight:700;padding:3px 10px;border-radius:999px}
+  .chip.ok{background:#06240f;color:var(--green)} .chip.no{background:#1a1a1d;color:var(--amber)}
+  .bar{height:6px;background:#1a1a1d;border-radius:4px;overflow:hidden;margin-bottom:10px}
+  .bar>div{height:100%;background:var(--green)}
+  .check{display:flex;justify-content:space-between;padding:5px 0;border-top:1px solid #151517;font-size:14px}
+  .check .v{font-variant-numeric:tabular-nums;color:var(--dim)}
+  .tick{display:inline-block;width:18px;font-weight:800}
+  .tablewrap{overflow-x:auto;border:1px solid var(--line);border-radius:14px}
+  table{width:100%;border-collapse:collapse;font-variant-numeric:tabular-nums;min-width:720px}
+  th,td{padding:10px 12px;text-align:left;border-bottom:1px solid #141416;white-space:nowrap}
+  th{background:#0b0b0c;color:var(--dim);font-size:12px;text-transform:uppercase;letter-spacing:.8px;font-weight:600;position:sticky;top:0}
+  tr.sig td{background:#06180c}
+  .side-yes{color:var(--green);font-weight:700} .side-no{color:var(--red);font-weight:700}
+  .tag{font-size:11px;font-weight:700;padding:2px 8px;border-radius:6px;background:#1a1a1d}
+  .tag.live{background:#06240f;color:var(--green)}
+  .tag.won{color:var(--green)} .tag.lost{color:var(--red)} .tag.open{color:var(--blue)}
+  .errors{color:var(--amber);font-size:13px;white-space:pre-wrap}
+  .empty{padding:22px;color:var(--dim);text-align:center}
+  @media (max-width:600px){ .kpi .val{font-size:22px} h1{font-size:17px} }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>Kalshi Scanner</h1>
+    <span id="mode" class="badge b-paper">PAPER</span>
+    <span id="health" class="muted"><span class="pulse"></span><span id="age">—</span></span>
+    <span class="spacer"></span>
+    <a class="btn" href="/export.csv">Download CSV</a>
+    <button id="killbtn" class="kill" onclick="toggleKill()">STOP LIVE TRADING</button>
+  </header>
+  <div id="killmsg" class="card" style="display:none;border-color:#6b1010;color:var(--red);margin-bottom:12px"></div>
+
+  <div class="grid kpis">
+    <div class="card kpi"><div class="label">Live P&amp;L today</div><div class="val" id="liveToday">$0.00</div><div class="sub" id="liveAll"></div></div>
+    <div class="card kpi"><div class="label">Paper P&amp;L (all time)</div><div class="val" id="paperAll">$0.00</div><div class="sub" id="paperSub"></div></div>
+    <div class="card kpi"><div class="label">Kalshi balance</div><div class="val" id="bal">—</div><div class="sub" id="balSub"></div></div>
+    <div class="card kpi"><div class="label">Signals today</div><div class="val" id="sigToday">0</div><div class="sub" id="openPos"></div></div>
+  </div>
+
+  <h2>Approval gates — live trading unlocks per asset when every box is green</h2>
+  <div class="grid gates" id="gates"></div>
+
+  <h2>Markets right now</h2>
+  <div class="tablewrap"><table>
+    <thead><tr><th>Asset</th><th>Market</th><th>Strike</th><th>Min left</th><th>Spot</th><th>Fair YES</th><th>YES ask</th><th>NO ask</th><th>Best</th><th>Edge</th><th>Status</th></tr></thead>
+    <tbody id="opps"></tbody>
+  </table></div>
+
+  <h2>Recent trades</h2>
+  <div class="tablewrap"><table>
+    <thead><tr><th>Time</th><th>Mode</th><th>Asset</th><th>Market</th><th>Side</th><th>Qty</th><th>Price</th><th>Fair</th><th>Edge</th><th>Result</th><th>P&amp;L</th></tr></thead>
+    <tbody id="trades"></tbody>
+  </table></div>
+
+  <h2>Price feeds &amp; health</h2>
+  <div class="card"><div id="feeds" class="muted"></div><div id="errors" class="errors" style="margin-top:10px"></div></div>
+  <p class="muted" style="font-size:12px;margin-top:22px">Not financial advice. Paper results assume fills at the ask plus 1¢ and can overstate real performance.</p>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+const money = v => (v<0?'-':'') + '$' + Math.abs(v||0).toFixed(2);
+const cls = v => v>0?'pos':(v<0?'neg':'');
+const pct = v => v==null?'—':(v*100).toFixed(0)+'%';
+const c2 = v => v==null||v===0?'—':v.toFixed(2);
+const esc = s => String(s??'').replace(/[&<>"]/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+let killed = false;
+
+async function load(){
+  let s;
+  try{ s = await (await fetch('/api/state')).json(); }catch(e){ $('age').textContent='dashboard offline'; return; }
+  const age = s.ts ? Math.round(s.server_ts - s.ts) : null;
+  $('age').textContent = age==null ? 'engine not started' : `updated ${age}s ago`;
+  $('health').classList.toggle('stale', age==null || age > 120);
+
+  killed = s.killed;
+  const anyLive = Object.values(s.gates||{}).some(g=>g.passed) && s.mode==='live' && s.live_ready;
+  const m = $('mode');
+  if (killed){ m.className='badge b-kill'; m.textContent='STOPPED'; }
+  else if (anyLive){ m.className='badge b-live'; m.textContent= s.demo?'LIVE (DEMO)':'LIVE'; }
+  else if (s.mode==='live'){ m.className='badge b-paper'; m.textContent='LIVE LOCKED — PAPER'; }
+  else { m.className='badge b-paper'; m.textContent='PAPER'; }
+  $('killbtn').textContent = killed ? 'RESUME' : 'STOP LIVE TRADING';
+  $('killbtn').className = killed ? 'resume' : 'kill';
+  $('killmsg').style.display = killed ? 'block':'none';
+  $('killmsg').textContent = killed ? 'Live trading is stopped: ' + (s.kill_reason||'manual') + '. Paper tracking continues.' : '';
+
+  const L=s.live||{}, P=s.paper||{};
+  $('liveToday').textContent = money(L.pnl_today); $('liveToday').className='val '+cls(L.pnl_today);
+  $('liveAll').textContent = `All time ${money(L.pnl_all)} · ${L.trades||0} trades`;
+  $('paperAll').textContent = money(P.pnl_all); $('paperAll').className='val '+cls(P.pnl_all);
+  $('paperSub').textContent = `${P.trades||0} settled · win rate ${P.win_rate??'—'}%`;
+  $('bal').textContent = s.balance==null ? '—' : money(s.balance);
+  $('balSub').textContent = s.live_ready ? (s.demo?'demo account':'connected') : 'no API key (paper only)';
+  $('sigToday').textContent = P.signals_today||0;
+  $('openPos').textContent = `${P.open||0} paper open · ${L.open||0} live open`;
+
+  const g = s.gates||{};
+  $('gates').innerHTML = Object.keys(g).length ? Object.entries(g).map(([a,x])=>{
+    const ok = x.checks.filter(c=>c.ok).length, n = x.checks.length;
+    const chip = x.passed ? '<span class="chip ok">APPROVED</span>' : `<span class="chip no">${ok} / ${n} PASSED</span>`;
+    return `<div class="card"><div class="gate-head"><b>${esc(a)}</b>${chip}</div>
+      <div class="bar"><div style="width:${100*ok/n}%"></div></div>
+      ${x.checks.map(c=>`<div class="check"><span><span class="tick ${c.ok?'pos':'neg'}">${c.ok?'✓':'✗'}</span>${esc(c.name)}</span>
+        <span class="v">${esc(c.value)} <span class="muted">/ ${esc(c.target)}</span></span></div>`).join('')}</div>`;
+  }).join('') : '<div class="card empty">Waiting for first scan…</div>';
+
+  const o = s.opportunities||[];
+  $('opps').innerHTML = o.length ? o.map(r=>`<tr class="${r.signal?'sig':''}">
+    <td><b>${esc(r.asset)}</b></td><td class="muted">${esc(r.ticker)}</td><td>${esc(r.strike)}</td>
+    <td>${r.minutes_left==null?'—':r.minutes_left.toFixed(1)}</td>
+    <td>${r.spot==null?'—':Number(r.spot).toLocaleString(undefined,{maximumFractionDigits:2})}</td>
+    <td>${pct(r.fair)}</td><td>${c2(r.yes_ask)}</td><td>${c2(r.no_ask)}</td>
+    <td class="side-${r.side||''}">${r.side?r.side.toUpperCase():'—'}</td>
+    <td class="${cls(r.edge)}">${r.edge==null?'—':(r.edge>0?'+':'')+r.edge.toFixed(3)}</td>
+    <td>${r.signal?'<span class="tag live">SIGNAL</span>':'<span class="muted">'+esc(r.note)+'</span>'}</td></tr>`).join('')
+    : '<tr><td colspan="11" class="empty">No open markets in the scan window.</td></tr>';
+
+  const t = s.recent||[];
+  $('trades').innerHTML = t.length ? t.map(r=>`<tr>
+    <td>${new Date(r.ts*1000).toLocaleString([], {month:'short',day:'numeric',hour:'numeric',minute:'2-digit'})}</td>
+    <td><span class="tag ${r.mode==='live'?'live':''}">${r.mode.toUpperCase()}</span></td>
+    <td><b>${esc(r.asset)}</b></td><td class="muted">${esc(r.ticker)}</td>
+    <td class="side-${r.side}">${r.side.toUpperCase()}</td><td>${r.contracts}</td>
+    <td>${r.price.toFixed(2)}</td><td>${pct(r.fair)}</td><td>+${(r.edge||0).toFixed(3)}</td>
+    <td><span class="tag ${r.status}">${r.status.toUpperCase()}</span></td>
+    <td class="${cls(r.pnl)}">${r.pnl==null?'—':money(r.pnl)}</td></tr>`).join('')
+    : '<tr><td colspan="11" class="empty">No trades yet.</td></tr>';
+
+  const p = s.prices||{};
+  $('feeds').innerHTML = Object.entries(p).map(([a,x])=> x
+      ? `<b style="color:var(--text)">${esc(a)}</b> ${Number(x.price).toLocaleString()} <span class="${x.age_sec>60?'neg':''}">(${x.age_sec}s old)</span>`
+      : `<b style="color:var(--text)">${esc(a)}</b> <span class="neg">feed down</span>`).join(' &nbsp;·&nbsp; ')
+    + `<br>Scanning ${Object.keys(s.series||{}).length} series · min edge ${s.settings?.min_edge??'—'} · max $${s.settings?.max_dollars??'—'}/trade · daily loss cap $${s.settings?.max_daily_loss??'—'}`;
+  $('errors').textContent = (s.errors||[]).join('\n');
+}
+
+async function toggleKill(){
+  if (!killed && !confirm('Stop all live trading now?')) return;
+  if (killed && !confirm('Resume live trading? Gates and risk limits still apply.')) return;
+  await fetch(killed?'/api/resume':'/api/kill',{method:'POST'});
+  load();
+}
+load(); setInterval(load, 5000);
+</script>
+</body>
+</html>
