@@ -77,35 +77,54 @@ BTC_SOURCES = {
 }
 
 
-class BtcComposite:
-    """Background sampler. One per process. Thread-safe reads."""
+# Live gold: PAXG is a token backed 1:1 by one troy ounce of gold, traded 24/7.
+# It tracks spot gold in real time for free. The engine measures and removes the gap
+# between PAXG and the price Kalshi actually settles gold on (see Engine.basis_offset).
+PAXG_SOURCES = {
+    "Coinbase": ("https://api.exchange.coinbase.com/products/PAXG-USD/ticker",
+                 lambda j: _mid(j.get("bid"), j.get("ask"), j.get("price"))),
+    "Kraken":   ("https://api.kraken.com/0/public/Ticker?pair=PAXGUSD",
+                 lambda j: (lambda r: _mid(r["b"][0], r["a"][0], r["c"][0]))(next(iter(j["result"].values())))),
+    "Gemini":   ("https://api.gemini.com/v1/pubticker/paxgusd",
+                 lambda j: _mid(j.get("bid"), j.get("ask"), j.get("last"))),
+}
 
-    def __init__(self, session=None, interval=2.0, start=True):
+
+class Composite:
+    """Background price sampler: median of several exchanges every `interval` seconds.
+    One per asset per process. Thread-safe reads."""
+
+    def __init__(self, sources, session=None, interval=2.0, start=True, min_sources=2,
+                 outlier_pct=0.003, min_price=1000, name="composite"):
+        self.sources = sources
         self.s = session or requests.Session()
         self.interval = interval
+        self.min_sources = min_sources
+        self.outlier_pct = outlier_pct
+        self.min_price = min_price
         self.samples = deque(maxlen=int(3 * 3600 / interval))   # 3 hours of history
         self.last_sources = {}
         self.lock = threading.Lock()
-        self.pool = ThreadPoolExecutor(max_workers=len(BTC_SOURCES))
+        self.pool = ThreadPoolExecutor(max_workers=len(sources))
         if start:
-            threading.Thread(target=self._loop, daemon=True, name="btc-composite").start()
+            threading.Thread(target=self._loop, daemon=True, name=name).start()
 
     def _fetch(self, name):
-        url, parse = BTC_SOURCES[name]
+        url, parse = self.sources[name]
         try:
             j = self.s.get(url, headers=UA, timeout=1.8).json()
             v = parse(j)
-            return name, (v if v and v > 1000 else None)
+            return name, (v if v and v > self.min_price else None)
         except Exception:
             return name, None
 
     def sample_once(self, ts=None):
-        got = dict(self.pool.map(self._fetch, BTC_SOURCES))
+        got = dict(self.pool.map(self._fetch, self.sources))
         prices = [v for v in got.values() if v]
-        if len(prices) >= 2:
+        if len(prices) >= self.min_sources:
             med = statistics.median(prices)
-            # drop any exchange more than 0.3% away from the others (bad tick / outage)
-            good = [p for p in prices if abs(p / med - 1) < 0.003] or prices
+            # drop any exchange too far from the others (bad tick / outage)
+            good = [p for p in prices if abs(p / med - 1) < self.outlier_pct] or prices
             px = statistics.median(good)
             with self.lock:
                 self.samples.append((ts or time.time(), px, len(good), max(good) - min(good)))
@@ -118,7 +137,7 @@ class BtcComposite:
             try:
                 self.sample_once()
             except Exception as e:
-                print(f"[btc] sampler error: {e}")
+                print(f"[prices] sampler error: {e}")
             time.sleep(max(0.2, self.interval - (time.time() - t0)))
 
     def add(self, ts, price, n=4, spread=0.0):          # used by tests
@@ -149,20 +168,39 @@ class BtcComposite:
             return self.samples[-1] if self.samples else None
 
 
-_btc = None
+class BtcComposite(Composite):
+    def __init__(self, session=None, interval=2.0, start=True):
+        super().__init__(BTC_SOURCES, session, interval, start, min_sources=2, name="btc-composite")
+
+
+class GoldComposite(Composite):
+    # PAXG trades on fewer exchanges, so one live source is accepted (accuracy is still checked every window)
+    def __init__(self, session=None, interval=2.0, start=True):
+        super().__init__(PAXG_SOURCES, session, interval, start, min_sources=1, outlier_pct=0.004,
+                         name="gold-composite")
+
+
+_comps = {}
+_FACTORY = {"BTC": BtcComposite, "GOLD": GoldComposite}
+
+
+def composite(asset, start=True):
+    """Running sampler for an asset (started on first use), or None if the asset has none."""
+    if asset not in _FACTORY:
+        return None
+    if asset not in _comps and start:
+        _comps[asset] = _FACTORY[asset]()
+    return _comps.get(asset)
 
 
 def btc_composite():
-    global _btc
-    if _btc is None:
-        _btc = BtcComposite()
-    return _btc
+    return composite("BTC")
 
 
-def brti(symbol, lookback_min, session=None):
-    """BTC price for the engine: BRTI-style composite + volatility/momentum history.
+def _composite_feed(asset, candle_symbol, label, lookback_min, session=None):
+    """Price for the engine from a composite + volatility/momentum history.
     Until we have our own history, Coinbase 1-min candles are shifted onto the composite level."""
-    comp = btc_composite()
+    comp = composite(asset)
     last = comp.latest()
     if not last:
         time.sleep(2.5)                      # first call right after start-up
@@ -174,16 +212,25 @@ def brti(symbol, lookback_min, session=None):
     if len(own) >= lookback_min:             # enough of our own history
         closes = own
     else:
-        cb = coinbase("BTC-USD", lookback_min, session)
+        cb = coinbase(candle_symbol, lookback_min, session)
         shift = px - cb["price"]
         closes = [c + shift for c in cb["closes"]]
     closes = closes[:-1] + [px] if closes else [px]
-    avg60, n60 = comp.avg(time.time(), 60)
+    avg60, _ = comp.avg(time.time(), 60)
     return {"price": px, "age_sec": time.time() - ts, "sigma_1m": _sigma(closes), "closes": closes,
-            "sources": n_src, "spread": spread, "avg60": avg60, "source": "BRTI estimate"}
+            "sources": n_src, "max_sources": len(comp.sources), "spread": spread, "avg60": avg60,
+            "source": label}
 
 
-FEEDS = {"coinbase": coinbase, "yahoo": yahoo, "brti": brti}
+def brti(symbol, lookback_min, session=None):
+    return _composite_feed("BTC", "BTC-USD", "BRTI est.", lookback_min, session)
+
+
+def paxg(symbol, lookback_min, session=None):
+    return _composite_feed("GOLD", "PAXG-USD", "PAXG", lookback_min, session)
+
+
+FEEDS = {"coinbase": coinbase, "yahoo": yahoo, "brti": brti, "paxg": paxg}
 
 
 def get_price(feed, symbol, lookback_min, session=None):

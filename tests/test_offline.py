@@ -455,7 +455,7 @@ def test_google_sheet_feed(cfg):
     assert c.get("/sheet/wrong-token.csv").status_code == 404
     body = c.get("/" + path).data.decode()
     lines = body.strip().splitlines()
-    assert lines[0] == "Time,Mode,Market,Call,Bought,Qty,Price,Odds %,Edge,Time left,Result,P&L,Momentum"
+    assert lines[0] == "Time,Mode,Market,Call,Bought,Qty,Price,Odds %,Edge,Time left,Result,P&L,Momentum,Price source"
     assert ",PAPER,BTC,UP,YES,1,0.56,75," in lines[1] and ",WON,0.42," in lines[1]   # 1 - 0.56 entry - 0.02 fee
     assert " · " in lines[1].split(",")[0] and "m " in lines[1].split(",")[9]
     new = c.get("/api/sheet-link?new=1").get_json()["url"]
@@ -505,3 +505,78 @@ def test_edge_variant_is_stricter():
     edge = res["A"]["edge"]
     assert 0.05 <= edge < 0.08 and res["C"] is None          # A trades a 5-8¢ edge, C refuses
     assert res["D"]["edge"] < res["A"]["edge"]                 # calmer odds = less confident
+
+
+
+# ---------------- GOLD via PAXG ----------------
+def test_paxg_composite_reads_exchanges():
+    from scanner.prices import GoldComposite
+    sess = FakeSession({
+        "coinbase": {"bid": "4100.10", "ask": "4100.90", "price": "4100.5"},
+        "kraken":   {"error": [], "result": {"PAXGUSD": {"b": ["4101.0", "1", "1"], "a": ["4101.6", "1", "1"], "c": ["4101.3", "1"]}}},
+    })
+    comp = GoldComposite(session=sess, start=False)
+    got = comp.sample_once(ts=10)
+    assert got["Coinbase"] and got["Kraken"] and got["Gemini"] is None     # one exchange down is fine
+    ts, px, n, spread = comp.latest()
+    assert n == 2 and 4100.4 < px < 4101.4
+    solo = GoldComposite(session=FakeSession({"coinbase": {"bid": "4100", "ask": "4101"}}), start=False)
+    solo.sample_once()
+    assert solo.latest()[2] == 1                                          # gold accepts a single live source
+
+
+def _gold_engine(cfg, gap, windows=4):
+    """Engine with a fake PAXG sampler that sits `gap` dollars below Kalshi's gold target every window."""
+    from scanner.prices import GoldComposite
+    comp = GoldComposite(session=FakeSession({}), start=False)
+    pub = FakePublic()
+    pub.discover = lambda: {"KXGOLD15M": {"asset": "GOLD", "title": "Gold 15 min", "fee_multiplier": 1.0}}
+    now = time.time()
+    for w in range(windows):
+        opened = now - 60 * (15 * (windows - w))
+        for i in range(30):
+            comp.add(opened - 59 + i * 2, 4100.0)
+        m = mk(f"KXGOLD15M-G{w}", 4100.0 + gap, 0.5, 0.45, minutes=10)
+        m["open_time"] = datetime.fromtimestamp(opened, timezone.utc).isoformat().replace("+00:00", "Z")
+        pub.markets[m["ticker"]] = m
+    e = Engine(cfg, public=pub, price_fn=lambda f, s, l: {"price": 4100.0, "age_sec": 0, "sigma_1m": 0.0004,
+                                                          "closes": [4100.0] * 61, "source": "PAXG",
+                                                          "sources": 2, "max_sources": 3},
+               btc=None)
+    e._comp_override["GOLD"] = comp
+    return e, pub
+
+
+def test_gold_gap_is_learned_and_corrected(cfg):
+    e, pub = _gold_engine(cfg, gap=12.0)
+    e.cycle()
+    hist = db.get(e.c, "gold_accuracy")
+    assert len(hist) == 4 and all(h["diff"] == -12.0 for h in hist)
+    assert e.basis_offset("GOLD") == 12.0                       # PAXG is $12 under Kalshi's gold price
+    px = e.prices()["GOLD"]
+    assert px["price"] == 4112.0 and px["offset"] == 12.0       # shifted onto Kalshi's level
+    acc = db.get(e.c, "state")["accuracy"]["GOLD"]
+    assert acc["gap"] == 12.0 and acc["mae"] == 0.0             # steady gap -> zero error after correction
+    assert e.basis_offset("BTC") == 0.0                         # BTC is never shifted
+    gate = e.gate_status["GOLD"]["checks"][0]
+    assert gate["name"] == "Price matches Kalshi" and "0.05%" in gate["target"]
+
+
+def test_gold_trade_records_price_source(cfg):
+    e, pub = _gold_engine(cfg, gap=0.0, windows=0)
+    pub.markets["KXGOLD15M-T"] = dict(mk("KXGOLD15M-T", 4095.0, 0.40, 0.35, minutes=6))
+    e.price_fn = lambda f, s, l: dict(feed(4.0, 4096.0, 4100.0), source="PAXG", sources=2, max_sources=3)
+    e.cycle()
+    t = db.recent(e.c)
+    assert t and t[0]["asset"] == "GOLD" and t[0]["src"].startswith("PAXG 2/3 ex")
+
+
+def test_settlement_rules_read_from_kalshi(cfg):
+    e, pub = _gold_engine(cfg, gap=0.0, windows=0)
+    m = mk("KXGOLD15M-R", 4095.0, 0.40, 0.35, minutes=12)
+    m["rules_primary"] = "If the simple average of the gold price in the 60 seconds before close is above the target, YES."
+    pub.markets[m["ticker"]] = m
+    e.cycle()
+    assert e.settle_avg_min("GOLD", "KXGOLD15M") == 1.0
+    assert "simple average" in db.get(e.c, "state")["rules"]["GOLD"]
+    assert e.settle_avg_min("BTC", "KXBTC15M") == 1.0           # BTC set explicitly in config

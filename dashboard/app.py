@@ -268,7 +268,7 @@ def sheet_csv(token):
     # Column order is fixed: the sheet's color rules point at D, E, K and L.
     # Time and Time left are written as plain text so Google Sheets shows them as-is.
     w.writerow(["Time", "Mode", "Market", "Call", "Bought", "Qty", "Price", "Odds %", "Edge",
-                "Time left", "Result", "P&L", "Momentum"])
+                "Time left", "Result", "P&L", "Momentum", "Price source"])
     for r in rows:
         fair = r.get("fair")
         odds = None if fair is None else (fair if r["side"] == "yes" else 1 - fair)
@@ -287,6 +287,7 @@ def sheet_csv(token):
             r["status"].upper(),
             "" if r.get("pnl") is None else f'{r["pnl"]:.2f}',
             "" if r.get("mom_z") is None else f'{abs(r["mom_z"]):.2f}',
+            r.get("src") or "",
         ])
     return Response(buf.getvalue(), mimetype="text/csv",
                     headers={"Cache-Control": "no-store"})

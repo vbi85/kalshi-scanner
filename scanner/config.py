@@ -70,6 +70,7 @@ class Config:
     # BTC only: our price must match Kalshi's own target price closely, every window
     gate_min_price_checks: int = int(_env("GATE_MIN_PRICE_CHECKS", "40"))
     gate_max_price_err_pct: float = float(_env("GATE_MAX_PRICE_ERR_PCT", "0.02"))   # 0.02% ≈ $16 at $80k
+    gate_max_price_err_pct_gold: float = float(_env("GATE_MAX_PRICE_ERR_PCT_GOLD", "0.05"))  # ≈ $2 at $4,000
 
     # ---------- Risk caps (live only) ----------
     max_contracts_per_trade: int = int(_env("MAX_CONTRACTS_PER_TRADE", "5"))
@@ -112,7 +113,9 @@ ASSETS = {
     # BTC uses a BRTI-style blend of 4 exchanges; Kalshi settles on a 60-second average (settle_avg_sec)
     "BTC":    {"patterns": [r"\bbitcoin\b", r"\bkxbtc"],                           "feed": "brti",     "symbol": "BTC-USD",
                "settle_avg_sec": 60},
-    "GOLD":   {"patterns": [r"\bgold\b", r"\bkxgold"],                             "feed": "yahoo",    "symbol": "GC=F"},
+    # GOLD uses live PAXG (gold-backed token, 24/7) with an automatic correction to Kalshi's gold price
+    "GOLD":   {"patterns": [r"\bgold\b", r"\bkxgold"],                             "feed": "paxg",     "symbol": "PAXG-USD",
+               "basis_correct": True},
     "WTI":    {"patterns": [r"\bwti\b", r"\bkxwti", r"\bcrude\b"],                 "feed": "yahoo",    "symbol": "CL=F"},
     "NATGAS": {"patterns": [r"\bnatural gas\b", r"\bkxnatgas", r"\bhenry hub\b"], "feed": "yahoo",    "symbol": "NG=F"},
 }

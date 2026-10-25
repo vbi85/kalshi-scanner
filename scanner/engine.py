@@ -9,6 +9,7 @@ Every cycle, for each market (BTC, Gold, Oil):
   5. Max one trade per asset per window. Settle results, update gates, publish to dashboard.
 """
 import dataclasses
+import statistics
 import math
 import os
 import time
@@ -23,6 +24,7 @@ from .kalshi import KalshiPublic, KalshiTrader, parse_time, quote
 from .model import edges, fair_yes, momentum, taker_fee, up_side
 from .prices import get_price
 
+ASSETS_BY_SERIES = {}
 TZ = ZoneInfo(os.getenv("TZ_NAME", "America/Chicago"))
 
 
@@ -35,6 +37,18 @@ def strike_text(m):
     if st == "between":
         return f"{lo:,} – {hi:,}"
     return st or "?"
+
+
+def src_label(px):
+    """Short description of where the price came from, saved with every trade."""
+    if not px:
+        return None
+    out = px.get("source") or "feed"
+    if px.get("sources"):
+        out += f" {px['sources']}/{px.get('max_sources', px['sources'])} ex"
+    if px.get("offset"):
+        out += f", gap {px['offset']:+.2f}"
+    return out
 
 
 def day_start_ts():
@@ -50,7 +64,8 @@ def mmss(minutes):
 class Engine:
     def __init__(self, cfg: Config, public=None, trader=None, price_fn=None, conn=None, btc=None):
         self.cfg = cfg
-        self._btc = btc                       # BTC composite sampler (tests pass a fake)
+        self._comp_override = {"BTC": btc} if btc else {}   # tests pass fake samplers
+        self.rules = {}                        # series -> Kalshi settlement rules text
         self._checked_open = set()
         self.pub = public or KalshiPublic(cfg)
         self.trader = trader
@@ -159,8 +174,31 @@ class Engine:
         out = {}
         for asset in {v["asset"] for v in self.series.values()}:
             spec = ASSETS[asset]
-            out[asset] = self.price_fn(spec["feed"], spec["symbol"], self.cfg.vol_lookback_min)
+            px = self.price_fn(spec["feed"], spec["symbol"], self.cfg.vol_lookback_min)
+            off = self.basis_offset(asset) if px else 0.0
+            if px and off:
+                # shift our live price onto the level Kalshi settles on (e.g. PAXG -> Kalshi gold)
+                px = dict(px, price=px["price"] + off, closes=[c + off for c in px.get("closes") or []],
+                          offset=off)
+            out[asset] = px
         return out
+
+    def basis_offset(self, asset, last=20, min_checks=3):
+        """Typical gap between Kalshi's target and our price, learned every window (median, robust)."""
+        if not ASSETS.get(asset, {}).get("basis_correct"):
+            return 0.0
+        hist = (db.get(self.c, f"{asset.lower()}_accuracy") or [])[-last:]
+        if len(hist) < min_checks:
+            return 0.0
+        return round(-statistics.median(h["diff"] for h in hist), 2)
+
+    def settle_avg_min(self, asset, series):
+        """Minutes of averaging in Kalshi's settlement: from config, else read from the market rules."""
+        spec = ASSETS.get(asset, {})
+        if "settle_avg_sec" in spec:
+            return spec["settle_avg_sec"] / 60
+        rules = (self.rules.get(series) or "").lower()
+        return 1.0 if "average" in rules else 0.0
 
     def evaluate(self, m, series_ticker, info, px):
         cfg = self.cfg
@@ -174,6 +212,7 @@ class Engine:
                "strike": strike_text(m), "target": target,
                "close_ts": close.timestamp() if close else None, "minutes_left": mins,
                "spot": px["price"] if px else None, "yes_ask": q["yes_ask"], "no_ask": q["no_ask"],
+               "src": src_label(px),
                "up_side": usd,
                "direction": None, "mom_z": None, "conf": None, "fair": None, "fair_base": None,
                "side": None, "price": None, "size": None, "edge": None,
@@ -203,7 +242,7 @@ class Engine:
         drift = cfg.mom_weight * mom["drift_1m"]
         # Kalshi settles on an average of the last N seconds, which is less jumpy than one tick:
         # for a final 1-minute average, the uncertainty equals that of (minutes left - 2/3 minute).
-        avg_min = ASSETS[info["asset"]].get("settle_avg_sec", 0) / 60
+        avg_min = self.settle_avg_min(info["asset"], series_ticker)
         mins_eff = max(0.05, mins - (2 / 3) * avg_min) if avg_min else mins
         fair = fair_yes(m, px["price"], px["sigma_1m"], mins_eff, cfg.vol_mult, drift)
         base = fair_yes(m, px["price"], px["sigma_1m"], mins_eff, cfg.vol_mult, 0.0)
@@ -246,7 +285,8 @@ class Engine:
         base = dict(ts=time.time(), asset=r["asset"], series=r["series"], ticker=r["ticker"], side=r["side"],
                     fair=round(r["fair"], 4), fair_base=round(r["fair_base"], 4), direction=r["direction"],
                     mom_z=round(r["mom_z"], 3), close_ts=r["close_ts"], edge=round(r["edge"], 4),
-                    minutes_left=round(r["minutes_left"], 2), spot=r["spot"], strike=r["strike"])
+                    minutes_left=round(r["minutes_left"], 2), spot=r["spot"], strike=r["strike"],
+                    src=r.get("src"))
         live = self.live_enabled(r["asset"])
         if not db.has_window(self.c, "paper", r["asset"], r["close_ts"]):
             price = round(min(0.99, r["price"] + self.cfg.slippage), 4)  # paper assumes 1c worse fill
@@ -326,8 +366,10 @@ class Engine:
 
     def update_gates(self):
         for asset in [a for a in ASSET_ORDER if a in {v["asset"] for v in self.series.values()} | {"BTC"}]:
-            acc = self.accuracy_stats() if asset == "BTC" else None
-            passed, checks, s = gates.evaluate(db.settled(self.c, "paper", asset), self.cfg, accuracy=acc)
+            acc = self.accuracy_stats(asset) if asset in ("BTC", "GOLD") else None
+            limit = self.cfg.gate_max_price_err_pct_gold if asset == "GOLD" else self.cfg.gate_max_price_err_pct
+            passed, checks, s = gates.evaluate(db.settled(self.c, "paper", asset), self.cfg, accuracy=acc,
+                                               max_err_pct=limit)
             was = self.gate_status.get(asset, {}).get("passed")
             self.gate_status[asset] = {"passed": passed, "checks": checks, "stats": s}
             if passed and was is False:
@@ -354,6 +396,7 @@ class Engine:
                                      "note": "no 15-min window open (market hours?)",
                                      "spot": (prices.get(asset) or {}).get("price")})
         order = {a: i for i, a in enumerate(ASSET_ORDER)}
+        ASSETS_BY_SERIES.update({k: v["asset"] for k, v in self.series.items()})
         for c in cards.values():
             c["label"] = ASSET_LABEL.get(c["asset"], c["asset"])
         db.put(self.c, "state", {
@@ -367,23 +410,25 @@ class Engine:
             "cards": sorted(cards.values(), key=lambda c: order.get(c["asset"], 9)),
             "gates": self.gate_status,
             "prices": {a: ({"price": p["price"], "age_sec": round(p["age_sec"]), "sources": p.get("sources"),
+                            "max_sources": p.get("max_sources"), "offset": p.get("offset"),
                             "spread": p.get("spread"), "source": p.get("source")} if p else None)
                        for a, p in prices.items()},
             "errors": self.errors,
-            "accuracy": {"BTC": self.accuracy_stats()},
+            "accuracy": {a: self.accuracy_stats(a) for a in ("BTC", "GOLD")},
+            "rules": {ASSETS_BY_SERIES.get(k, k): v[:300] for k, v in self.rules.items()},
             "variants": variants.stats(db.shadow_all(self.c)),
             "settings": {"entry_start": self.cfg.entry_start_min, "entry_end": self.cfg.entry_end_min,
                          "min_edge": self.cfg.min_edge, "mom_min_z": self.cfg.mom_min_z,
                          "max_dollars": self.cfg.max_dollars_per_trade, "max_daily_loss": self.cfg.max_daily_loss},
         })
 
-    def btc_sampler(self):
-        return self._btc or prices._btc
+    def sampler(self, asset):
+        return self._comp_override.get(asset) or prices.composite(asset, start=False)
 
-    def check_price_accuracy(self, m):
-        """Kalshi's target for a window = 60-sec BRTI average before it opened.
-        Compare our 60-sec average for the same moment. Runs once per window."""
-        comp = self.btc_sampler()
+    def check_price_accuracy(self, m, asset):
+        """Kalshi's target for a window = its settlement price just before the window opened.
+        Compare our (uncorrected) 60-sec average for the same moment. Runs once per window."""
+        comp = self.sampler(asset)
         t = m.get("ticker")
         if not comp or t in self._checked_open or m.get("floor_strike") is None:
             return
@@ -395,21 +440,27 @@ class Engine:
         if ours is None or n < 15:          # bot wasn't running long enough before this window
             return
         kalshi = float(m["floor_strike"])
+        key = f"{asset.lower()}_accuracy"
         rec = {"ts": opened.timestamp(), "ticker": t, "ours": round(ours, 2), "kalshi": kalshi,
                "diff": round(ours - kalshi, 2), "pct": round((ours - kalshi) / kalshi * 100, 4), "n": n}
-        hist = (db.get(self.c, "btc_accuracy") or [])
+        hist = (db.get(self.c, key) or [])
         if not any(h["ticker"] == t for h in hist):
-            db.put(self.c, "btc_accuracy", (hist + [rec])[-500:])
+            db.put(self.c, key, (hist + [rec])[-500:])
 
-    def accuracy_stats(self, last=96):
-        hist = (db.get(self.c, "btc_accuracy") or [])[-last:]
+    def accuracy_stats(self, asset="BTC", last=96):
+        """Error vs Kalshi's target AFTER our correction (BTC: none; GOLD: learned gap removed)."""
+        hist = (db.get(self.c, f"{asset.lower()}_accuracy") or [])[-last:]
         if not hist:
             return {"n": 0}
-        abs_d = [abs(h["diff"]) for h in hist]
-        return {"n": len(hist), "mae": round(sum(abs_d) / len(abs_d), 2),
-                "mae_pct": round(sum(abs(h["pct"]) for h in hist) / len(hist), 4),
-                "bias": round(sum(h["diff"] for h in hist) / len(hist), 2),
-                "worst": round(max(abs_d), 2), "last": hist[-1]}
+        corr = 0.0
+        if ASSETS.get(asset, {}).get("basis_correct") and len(hist) >= 3:
+            corr = statistics.median(h["diff"] for h in hist)
+        res = [h["diff"] - corr for h in hist]
+        lvl = hist[-1]["kalshi"]
+        mae = sum(abs(x) for x in res) / len(res)
+        return {"n": len(hist), "mae": round(mae, 2), "mae_pct": round(mae / lvl * 100, 4),
+                "bias": round(sum(res) / len(res), 2), "worst": round(max(abs(x) for x in res), 2),
+                "gap": round(-corr, 2), "last": hist[-1]}
 
     def cycle(self):
         self.refresh_trader()
@@ -426,8 +477,10 @@ class Engine:
                 self.err(f"{st}: {e}")
                 continue
             for m in markets:
-                if info["asset"] == "BTC":
-                    self.check_price_accuracy(m)
+                if st not in self.rules and m.get("rules_primary"):
+                    self.rules[st] = m["rules_primary"]
+                if self.sampler(info["asset"]):
+                    self.check_price_accuracy(m, info["asset"])
                 r = self.evaluate(m, st, info, px.get(info["asset"]))
                 if r["signal"]:
                     self.act(r, info)

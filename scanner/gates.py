@@ -31,7 +31,7 @@ def stats(trades):
     }
 
 
-def evaluate(trades, cfg, recent_n=None, accuracy=None):
+def evaluate(trades, cfg, recent_n=None, accuracy=None, max_err_pct=None):
     """Return (passed: bool, checks: list of dicts) for one asset's paper trades."""
     s = stats(trades)
     recent_n = recent_n or cfg.gate_recent_n
@@ -67,10 +67,11 @@ def evaluate(trades, cfg, recent_n=None, accuracy=None):
         {"name": f"Last {recent_n} trades profitable", "value": f'${recent_pnl:.2f}', "target": "> $0",
          "ok": recent_pnl > 0},
     ]
-    if accuracy is not None:   # BTC: our price must match Kalshi's target price
+    if accuracy is not None:   # BTC/GOLD: our price must match Kalshi's target price
         n, err = accuracy.get("n", 0), accuracy.get("mae_pct")
+        lim = max_err_pct if max_err_pct is not None else cfg.gate_max_price_err_pct
         checks.insert(0, {"name": "Price matches Kalshi",
                           "value": "—" if not n else f'±${accuracy["mae"]:.2f} ({n})',
-                          "target": f'≤ {cfg.gate_max_price_err_pct:g}%, {cfg.gate_min_price_checks} checks',
-                          "ok": n >= cfg.gate_min_price_checks and err is not None and err <= cfg.gate_max_price_err_pct})
+                          "target": f'≤ {lim:g}%, {cfg.gate_min_price_checks} checks',
+                          "ok": n >= cfg.gate_min_price_checks and err is not None and err <= lim})
     return all(c["ok"] for c in checks), checks, s

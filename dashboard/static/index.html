@@ -317,17 +317,23 @@ function cardHTML(c){
     ${clock}${tl}
     <div class="row2">
       <div class="stat"><div class="l">Target</div><div class="v">${num(c.target,decimals)}</div></div>
-      <div class="stat"><div class="l">Now${c.asset==='BTC'?' · BRTI est.':''}</div><div class="v">${num(c.spot,decimals)}
+      <div class="stat"><div class="l">Now${({BTC:' · BRTI est.',GOLD:' · PAXG'})[c.asset]||''}</div><div class="v">${num(c.spot,decimals)}
         ${diff!=null?`<span class="${cls(diff)}" style="font-size:13px"> ${diff>0?'+':''}${diffPct.toFixed(3)}%</span>`:''}</div></div>
     </div>${accLine(c)}${kalshiPx(c)}${pred}${action}${note}</div>`;
 }
 function accLine(c){
-  if (c.asset!=='BTC') return '';
-  const p = ((lastState.prices||{}).BTC)||{}, a = ((lastState.accuracy||{}).BTC)||{};
-  const src = p.sources ? `${p.sources}/4 exchanges` : 'starting…';
-  const acc = a.n ? `vs Kalshi target: <b class="${a.mae_pct<=0.02?'pos':'neg'}">±$${a.mae.toFixed(2)}</b> avg over ${a.n} window${a.n>1?'s':''}`
+  if (!['BTC','GOLD'].includes(c.asset)) return rulesLine(c);
+  const p = ((lastState.prices||{})[c.asset])||{}, a = ((lastState.accuracy||{})[c.asset])||{};
+  const lim = c.asset==='GOLD' ? 0.05 : 0.02;
+  const src = p.sources ? `${p.sources}/${p.max_sources||p.sources} exchanges` : 'starting…';
+  const gap = (c.asset==='GOLD' && a.n>=3) ? ` · PAXG→Kalshi gap ${a.gap>=0?'+':''}$${a.gap.toFixed(2)} (auto-corrected)` : '';
+  const acc = a.n ? `vs Kalshi target: <b class="${a.mae_pct<=lim?'pos':'neg'}">±$${a.mae.toFixed(2)}</b> avg over ${a.n} window${a.n>1?'s':''}`
                   : 'vs Kalshi target: measuring (first check within 15 min)';
-  return `<div class="muted" style="font-size:13px;margin-top:8px">${src} · ${acc}</div>`;
+  return `<div class="muted" style="font-size:13px;margin-top:8px">${src} · ${acc}${gap}</div>` + rulesLine(c);
+}
+function rulesLine(c){
+  const r = ((lastState.rules||{})[c.asset]);
+  return r ? `<details class="muted" style="font-size:12px;margin-top:6px"><summary>How Kalshi settles this market</summary>${esc(r)}</details>` : '';
 }
 function kalshiPx(c){
   if (!c.close_ts || (c.yes_ask==null && c.no_ask==null)) return '';

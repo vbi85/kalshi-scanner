@@ -41,6 +41,10 @@ def connect(path):
     c.row_factory = sqlite3.Row
     c.execute("PRAGMA journal_mode=WAL")
     c.executescript(SCHEMA)
+    cols = {r[1] for r in c.execute("PRAGMA table_info(trades)")}
+    if "src" not in cols:                       # price source used for the trade (added later)
+        c.execute("ALTER TABLE trades ADD COLUMN src TEXT")
+        c.commit()
     return c
 
 
