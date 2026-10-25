@@ -101,6 +101,8 @@
   .timeline .now{position:absolute;top:-3px;bottom:-3px;width:3px;background:#fff;border-radius:2px}
   .tl-labels{display:flex;justify-content:space-between;font-size:11px;color:var(--dim)}
   .row2{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:14px}
+  .kpx{padding-top:12px;border-top:1px solid #1a1a1d}
+  header .acts.solo{grid-template-columns:1fr}
   .stat .l{font-size:11px;color:var(--dim);text-transform:uppercase;letter-spacing:.8px}
   .stat .v{font-size:18px;font-weight:700;font-variant-numeric:tabular-nums}
   .pred{display:flex;align-items:center;gap:14px;margin-top:14px;padding:12px;border-radius:12px;background:#111113}
@@ -298,7 +300,15 @@ function cardHTML(c){
       <div class="stat"><div class="l">Target</div><div class="v">${num(c.target,decimals)}</div></div>
       <div class="stat"><div class="l">Now</div><div class="v">${num(c.spot,decimals)}
         ${diff!=null?`<span class="${cls(diff)}" style="font-size:13px"> ${diff>0?'+':''}${diffPct.toFixed(3)}%</span>`:''}</div></div>
-    </div>${pred}${action}${note}</div>`;
+    </div>${kalshiPx(c)}${pred}${action}${note}</div>`;
+}
+function kalshiPx(c){
+  if (!c.close_ts || (c.yes_ask==null && c.no_ask==null)) return '';
+  const upAsk = c.up_side==='no' ? c.no_ask : c.yes_ask, dnAsk = c.up_side==='no' ? c.yes_ask : c.no_ask;
+  const cents = v => v ? Math.round(v*100)+'¢' : '—';
+  return `<div class="row2 kpx">
+    <div class="stat"><div class="l">Kalshi UP price</div><div class="v up">${cents(upAsk)}</div></div>
+    <div class="stat"><div class="l">Kalshi DOWN price</div><div class="v down">${cents(dnAsk)}</div></div></div>`;
 }
 
 function tick(){
@@ -360,6 +370,9 @@ async function load(){
   else if (anyLive){ m.className='badge b-live'; m.textContent= K.demo?'LIVE (DEMO)':'LIVE'; }
   else if (s.mode==='live'){ m.className='badge b-paper'; m.textContent='LIVE LOCKED — PAPER'; }
   else { m.className='badge b-paper'; m.textContent='PAPER'; }
+  const showStop = killed || s.mode==='live';
+  $('killbtn').style.display = showStop ? '' : 'none';
+  document.querySelector('header .acts').classList.toggle('solo', !showStop);
   $('killbtn').textContent = killed ? 'RESUME' : 'STOP LIVE TRADING';
   $('killbtn').className = killed ? 'resume' : 'kill';
   $('killmsg').style.display = killed ? 'block':'none';

@@ -172,6 +172,7 @@ class Engine:
                "strike": strike_text(m), "target": target,
                "close_ts": close.timestamp() if close else None, "minutes_left": mins,
                "spot": px["price"] if px else None, "yes_ask": q["yes_ask"], "no_ask": q["no_ask"],
+               "up_side": usd,
                "direction": None, "mom_z": None, "conf": None, "fair": None, "fair_base": None,
                "side": None, "price": None, "size": None, "edge": None,
                "status": "WAITING", "note": "", "signal": False,
@@ -317,7 +318,8 @@ class Engine:
                 self.err(f"balance: {e}")
         # one card per asset: the window closing soonest
         cards = {}
-        for r in sorted(rows, key=lambda r: r["minutes_left"] if r["minutes_left"] is not None else 99):
+        live_rows = [r for r in rows if r["minutes_left"] is not None and r["minutes_left"] > 0.05]
+        for r in sorted(live_rows, key=lambda r: r["minutes_left"]):
             cards.setdefault(r["asset"], r)
         for asset in sorted({v["asset"] for v in self.series.values()}):
             cards.setdefault(asset, {"asset": asset, "status": "NO MARKET",

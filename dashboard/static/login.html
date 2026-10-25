@@ -35,8 +35,10 @@
   <h1>Kalshi 15-Min Bot</h1>
   <p>Sign in to see your markets</p>
   <div class="err">{{ERROR}}</div>
-  <input name="username" placeholder="Username" autocomplete="username" autocapitalize="none" required>
-  <input name="password" type="password" placeholder="Password" autocomplete="current-password" required>
+  <input name="username" placeholder="Username" autocomplete="username" autocapitalize="none" autocorrect="off" spellcheck="false" required>
+  <input name="password" id="pw" type="password" placeholder="Password" autocomplete="current-password"
+         autocapitalize="none" autocorrect="off" spellcheck="false" required>
+  <label><input type="checkbox" onclick="document.getElementById('pw').type=this.checked?'text':'password'"> Show password</label>
   <label><input type="checkbox" name="remember" checked> Keep me signed in for 30 days</label>
   <button type="submit">Sign in</button>
 </form>

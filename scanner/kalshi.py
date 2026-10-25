@@ -74,7 +74,7 @@ class KalshiPublic:
     def open_markets(self, series_ticker, max_minutes):
         now = int(time.time())
         params = {"series_ticker": series_ticker, "status": "open", "limit": 1000,
-                  "max_close_ts": now + int(max_minutes * 60)}
+                  "min_close_ts": now + 3, "max_close_ts": now + int(max_minutes * 60)}
         out, cursor = [], None
         for _ in range(5):
             if cursor:

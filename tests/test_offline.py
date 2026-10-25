@@ -347,3 +347,17 @@ def test_engine_follows_dashboard_switch_and_loads_key(cfg, tmp_path):
     db.put(e.c, "kalshi_key", None)
     e.cycle()
     assert e.trader is None
+
+
+def test_card_never_shows_ended_window(cfg):
+    ended = mk("KXBTC15M-OLD", 99_900, 0.97, 0.95, minutes=-0.2)
+    current = mk("KXBTC15M-NEW", 99_950, 0.55, 0.50, minutes=12)
+    e, _, _ = run(cfg, [ended, current])
+    card = next(c for c in db.get(e.c, "state")["cards"] if c["asset"] == "BTC")
+    assert card["ticker"] == "KXBTC15M-NEW" and card["minutes_left"] > 11
+    assert card["up_side"] == "yes" and card["yes_ask"] == 0.55
+
+
+def test_login_has_show_password():
+    html = open("dashboard/static/login.html").read()
+    assert "Show password" in html and 'id="pw"' in html
