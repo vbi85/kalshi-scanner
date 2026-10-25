@@ -10,7 +10,7 @@ HOST="${DASH_HOST:-${IP//./-}.sslip.io}"
 
 echo "==> Installing system packages"
 apt-get update -y
-apt-get install -y python3-venv python3-pip git ufw debian-keyring debian-archive-keyring apt-transport-https curl gnupg
+apt-get install -y python3-venv python3-pip git rsync ufw debian-keyring debian-archive-keyring apt-transport-https curl gnupg
 
 echo "==> Installing Caddy (automatic HTTPS)"
 if ! command -v caddy >/dev/null; then
@@ -21,7 +21,7 @@ fi
 
 echo "==> Installing the bot"
 id -u scanner >/dev/null 2>&1 || useradd -r -m -d "$APP" scanner
-mkdir -p "$APP" && cp -r . "$APP" && cd "$APP"
+mkdir -p "$APP" && rsync -a --exclude .git ./ "$APP"/ && cd "$APP"
 python3 -m venv .venv && .venv/bin/pip install -q -r requirements.txt
 if [ ! -f .env ]; then
   cp .env.example .env

@@ -53,7 +53,7 @@ Gates are re-checked every cycle. An asset that starts failing drops back to pap
    It prints your dashboard address (`https://<ip-with-dashes>.sslip.io`), username and a generated password.
    Free HTTPS is set up automatically with Caddy. Port 8080 is not exposed to the internet.
 4. Edit `/opt/kalshi-scanner/.env` for text alerts, then `systemctl restart kalshi-engine kalshi-dashboard`.
-5. Updates later: `bash /opt/kalshi-scanner/deploy/update.sh`
+5. Updates later: `bash ~/kalshi-scanner/deploy/update.sh` (keeps your settings, history and Kalshi key)
 6. Logs: `journalctl -u kalshi-engine -f`
 
 ## Put it on your phone
