@@ -16,7 +16,7 @@ import traceback
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
-from . import db, gates
+from . import db, gates, prices
 from .alerts import Alerter
 from .config import ASSET_LABEL, ASSET_ORDER, ASSETS, Config
 from .kalshi import KalshiPublic, KalshiTrader, parse_time, quote
@@ -48,8 +48,10 @@ def mmss(minutes):
 
 
 class Engine:
-    def __init__(self, cfg: Config, public=None, trader=None, price_fn=None, conn=None):
+    def __init__(self, cfg: Config, public=None, trader=None, price_fn=None, conn=None, btc=None):
         self.cfg = cfg
+        self._btc = btc                       # BTC composite sampler (tests pass a fake)
+        self._checked_open = set()
         self.pub = public or KalshiPublic(cfg)
         self.trader = trader
         self._injected = trader is not None      # tests pass a fake trader
@@ -199,8 +201,12 @@ class Engine:
             return blocked("not enough price history")
 
         drift = cfg.mom_weight * mom["drift_1m"]
-        fair = fair_yes(m, px["price"], px["sigma_1m"], mins, cfg.vol_mult, drift)
-        base = fair_yes(m, px["price"], px["sigma_1m"], mins, cfg.vol_mult, 0.0)
+        # Kalshi settles on an average of the last N seconds, which is less jumpy than one tick:
+        # for a final 1-minute average, the uncertainty equals that of (minutes left - 2/3 minute).
+        avg_min = ASSETS[info["asset"]].get("settle_avg_sec", 0) / 60
+        mins_eff = max(0.05, mins - (2 / 3) * avg_min) if avg_min else mins
+        fair = fair_yes(m, px["price"], px["sigma_1m"], mins_eff, cfg.vol_mult, drift)
+        base = fair_yes(m, px["price"], px["sigma_1m"], mins_eff, cfg.vol_mult, 0.0)
         if fair is None:
             return blocked("cannot price this market")
         side = usd if mom["dir"] == "UP" else ("no" if usd == "yes" else "yes")
@@ -299,7 +305,8 @@ class Engine:
 
     def update_gates(self):
         for asset in [a for a in ASSET_ORDER if a in {v["asset"] for v in self.series.values()} | {"BTC"}]:
-            passed, checks, s = gates.evaluate(db.settled(self.c, "paper", asset), self.cfg)
+            acc = self.accuracy_stats() if asset == "BTC" else None
+            passed, checks, s = gates.evaluate(db.settled(self.c, "paper", asset), self.cfg, accuracy=acc)
             was = self.gate_status.get(asset, {}).get("passed")
             self.gate_status[asset] = {"passed": passed, "checks": checks, "stats": s}
             if passed and was is False:
@@ -338,13 +345,49 @@ class Engine:
             "balance": balance,
             "cards": sorted(cards.values(), key=lambda c: order.get(c["asset"], 9)),
             "gates": self.gate_status,
-            "prices": {a: ({"price": p["price"], "age_sec": round(p["age_sec"])} if p else None)
+            "prices": {a: ({"price": p["price"], "age_sec": round(p["age_sec"]), "sources": p.get("sources"),
+                            "spread": p.get("spread"), "source": p.get("source")} if p else None)
                        for a, p in prices.items()},
             "errors": self.errors,
+            "accuracy": {"BTC": self.accuracy_stats()},
             "settings": {"entry_start": self.cfg.entry_start_min, "entry_end": self.cfg.entry_end_min,
                          "min_edge": self.cfg.min_edge, "mom_min_z": self.cfg.mom_min_z,
                          "max_dollars": self.cfg.max_dollars_per_trade, "max_daily_loss": self.cfg.max_daily_loss},
         })
+
+    def btc_sampler(self):
+        return self._btc or prices._btc
+
+    def check_price_accuracy(self, m):
+        """Kalshi's target for a window = 60-sec BRTI average before it opened.
+        Compare our 60-sec average for the same moment. Runs once per window."""
+        comp = self.btc_sampler()
+        t = m.get("ticker")
+        if not comp or t in self._checked_open or m.get("floor_strike") is None:
+            return
+        opened = parse_time(m.get("open_time"))
+        if not opened or time.time() < opened.timestamp() + 5:
+            return
+        self._checked_open.add(t)
+        ours, n = comp.avg(opened.timestamp(), 60)
+        if ours is None or n < 15:          # bot wasn't running long enough before this window
+            return
+        kalshi = float(m["floor_strike"])
+        rec = {"ts": opened.timestamp(), "ticker": t, "ours": round(ours, 2), "kalshi": kalshi,
+               "diff": round(ours - kalshi, 2), "pct": round((ours - kalshi) / kalshi * 100, 4), "n": n}
+        hist = (db.get(self.c, "btc_accuracy") or [])
+        if not any(h["ticker"] == t for h in hist):
+            db.put(self.c, "btc_accuracy", (hist + [rec])[-500:])
+
+    def accuracy_stats(self, last=96):
+        hist = (db.get(self.c, "btc_accuracy") or [])[-last:]
+        if not hist:
+            return {"n": 0}
+        abs_d = [abs(h["diff"]) for h in hist]
+        return {"n": len(hist), "mae": round(sum(abs_d) / len(abs_d), 2),
+                "mae_pct": round(sum(abs(h["pct"]) for h in hist) / len(hist), 4),
+                "bias": round(sum(h["diff"] for h in hist) / len(hist), 2),
+                "worst": round(max(abs_d), 2), "last": hist[-1]}
 
     def cycle(self):
         self.refresh_trader()
@@ -361,6 +404,8 @@ class Engine:
                 self.err(f"{st}: {e}")
                 continue
             for m in markets:
+                if info["asset"] == "BTC":
+                    self.check_price_accuracy(m)
                 r = self.evaluate(m, st, info, px.get(info["asset"]))
                 if r["signal"]:
                     self.act(r, info)

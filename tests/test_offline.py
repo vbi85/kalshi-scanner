@@ -186,6 +186,9 @@ def _seed(c, n, win_rate, price=0.5, asset="BTC", mom_better=True):
                         close_ts=1000 + i, direction="UP")
     for i, t in enumerate(db.open_trades(c)):
         db.settle(c, t["id"], "yes" if (i * win_rate) % 1 + win_rate >= 1 else "no")
+    if asset == "BTC":   # good price-accuracy history so the BTC price gate passes
+        db.put(c, "btc_accuracy", [{"ts": 1000 + i, "ticker": f"W{i}", "ours": 80000 + 3, "kalshi": 80000,
+                                    "diff": 3.0, "pct": 0.0038, "n": 30} for i in range(60)])
 
 
 def test_gates_block_and_unlock(cfg, tmp_path):
@@ -361,3 +364,79 @@ def test_card_never_shows_ended_window(cfg):
 def test_login_has_show_password():
     html = open("dashboard/static/login.html").read()
     assert "Show password" in html and 'id="pw"' in html
+
+
+# ---------------- BRTI-style price + accuracy vs Kalshi ----------------
+class FakeSession:
+    def __init__(self, data):
+        self.data = data
+
+    def get(self, url, **kw):
+        class R:
+            def __init__(s, j): s._j = j
+            def json(s):
+                if isinstance(s._j, Exception):
+                    raise s._j
+                return s._j
+        for key, val in self.data.items():
+            if key in url:
+                return R(val)
+        return R(RuntimeError("down"))
+
+
+def test_composite_median_and_outlier():
+    from scanner.prices import BtcComposite
+    sess = FakeSession({
+        "coinbase": {"bid": "80000", "ask": "80002", "price": "80001"},
+        "kraken":   {"error": [], "result": {"XXBTZUSD": {"b": ["80004", "1", "1"], "a": ["80006", "1", "1"], "c": ["80005", "1"]}}},
+        "bitstamp": {"bid": "79998", "ask": "80000", "last": "79999"},
+        "gemini":   {"bid": "81000", "ask": "81002", "last": "81001"},      # bad tick, 1.2% off
+    })
+    comp = BtcComposite(session=sess, start=False)
+    got = comp.sample_once(ts=100)
+    assert all(got[k] for k in ("Coinbase", "Kraken", "Bitstamp", "Gemini"))
+    ts, px, n, spread = comp.latest()
+    assert n == 3 and 79998 < px < 80006          # Gemini outlier dropped
+    for i in range(30):
+        comp.add(1000 + i * 2, 80000 + i)
+    avg, cnt = comp.avg(1060, 60)                 # samples in (1000, 1060]
+    assert cnt == 29 and abs(avg - 80015.0) < 0.01   # sample at exactly 1000 is outside the window
+
+
+def test_composite_survives_exchange_outage():
+    from scanner.prices import BtcComposite
+    sess = FakeSession({"coinbase": {"bid": "80000", "ask": "80002"},
+                        "bitstamp": {"bid": "80001", "ask": "80003"}})
+    comp = BtcComposite(session=sess, start=False)
+    comp.sample_once(ts=5)
+    assert comp.latest()[2] == 2                  # 2 of 4 exchanges is still enough
+    comp2 = BtcComposite(session=FakeSession({"coinbase": {"bid": "1", "ask": "2"}}), start=False)
+    comp2.sample_once()
+    assert comp2.latest() is None                 # fewer than 2 good exchanges -> no price
+
+
+def test_averaged_settlement_shrinks_uncertainty():
+    from scanner.model import fair_yes
+    m = {"strike_type": "greater_or_equal", "floor_strike": 80000}
+    plain = fair_yes(m, 80040, 0.0008, 3, 1.0)
+    averaged = fair_yes(m, 80040, 0.0008, 3 - 2 / 3, 1.0)
+    assert averaged > plain > 0.5                 # less time for noise -> more confident
+
+
+def test_accuracy_check_against_kalshi_target(cfg):
+    from scanner.prices import BtcComposite
+    comp = BtcComposite(session=FakeSession({}), start=False)
+    opened = time.time() - 120
+    for i in range(30):
+        comp.add(opened - 59 + i * 2, 80010.0)    # our 60-sec average = 80010
+    m = mk("KXBTC15M-ACC", 80004.0, 0.55, 0.50, minutes=10)
+    m["open_time"] = datetime.fromtimestamp(opened, timezone.utc).isoformat().replace("+00:00", "Z")
+    pub = FakePublic(); pub.markets[m["ticker"]] = m
+    e = Engine(cfg, public=pub, price_fn=make_price_fn(), btc=comp)
+    e.cycle(); e.cycle()
+    hist = db.get(e.c, "btc_accuracy")
+    assert len(hist) == 1 and hist[0]["diff"] == 6.0           # checked once per window
+    st = db.get(e.c, "state")
+    assert st["accuracy"]["BTC"]["mae"] == 6.0
+    btc_gate = e.gate_status["BTC"]["checks"][0]
+    assert btc_gate["name"] == "Price matches Kalshi" and not btc_gate["ok"]   # needs 40 checks

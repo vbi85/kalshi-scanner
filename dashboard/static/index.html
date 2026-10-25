@@ -298,9 +298,17 @@ function cardHTML(c){
     ${clock}${tl}
     <div class="row2">
       <div class="stat"><div class="l">Target</div><div class="v">${num(c.target,decimals)}</div></div>
-      <div class="stat"><div class="l">Now</div><div class="v">${num(c.spot,decimals)}
+      <div class="stat"><div class="l">Now${c.asset==='BTC'?' · BRTI est.':''}</div><div class="v">${num(c.spot,decimals)}
         ${diff!=null?`<span class="${cls(diff)}" style="font-size:13px"> ${diff>0?'+':''}${diffPct.toFixed(3)}%</span>`:''}</div></div>
-    </div>${kalshiPx(c)}${pred}${action}${note}</div>`;
+    </div>${accLine(c)}${kalshiPx(c)}${pred}${action}${note}</div>`;
+}
+function accLine(c){
+  if (c.asset!=='BTC') return '';
+  const p = ((lastState.prices||{}).BTC)||{}, a = ((lastState.accuracy||{}).BTC)||{};
+  const src = p.sources ? `${p.sources}/4 exchanges` : 'starting…';
+  const acc = a.n ? `vs Kalshi target: <b class="${a.mae_pct<=0.02?'pos':'neg'}">±$${a.mae.toFixed(2)}</b> avg over ${a.n} window${a.n>1?'s':''}`
+                  : 'vs Kalshi target: measuring (first check within 15 min)';
+  return `<div class="muted" style="font-size:13px;margin-top:8px">${src} · ${acc}</div>`;
 }
 function kalshiPx(c){
   if (!c.close_ts || (c.yes_ask==null && c.no_ask==null)) return '';
@@ -417,7 +425,7 @@ async function load(){
 
   const p = s.prices||{};
   $('feeds').innerHTML = Object.entries(p).map(([a,x])=> x
-      ? `<b style="color:var(--text)">${esc(lbl(a))}</b> ${Number(x.price).toLocaleString()} <span class="${x.age_sec>60?'neg':''}">(${x.age_sec<60?'live':Math.round(x.age_sec/60)+' min delayed'})</span>`
+      ? `<b style="color:var(--text)">${esc(lbl(a))}</b> ${Number(x.price).toLocaleString()} <span class="${x.age_sec>60?'neg':''}">(${x.age_sec<60?'live':Math.round(x.age_sec/60)+' min delayed'}${x.sources?`, ${x.sources} exchanges, spread $${(x.spread||0).toFixed(2)}`:''})</span>`
       : `<b style="color:var(--text)">${esc(lbl(a))}</b> <span class="neg">feed down</span>`).join(' &nbsp;·&nbsp; ')
     + `<br>Min edge ${cfg.min_edge} · min momentum ${cfg.mom_min_z}σ · max $${cfg.max_dollars}/trade · daily loss cap $${cfg.max_daily_loss}`;
   $('errors').textContent = (s.errors||[]).join('\n');

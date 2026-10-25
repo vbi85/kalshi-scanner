@@ -45,7 +45,145 @@ def yahoo(symbol, lookback_min, session=None):
     return {"price": float(price), "age_sec": age, "sigma_1m": _sigma(closes), "closes": closes}
 
 
-FEEDS = {"coinbase": coinbase, "yahoo": yahoo}
+# ---------------------------------------------------------------------------
+# BRTI-style Bitcoin price
+# Kalshi settles BTC 15-min markets on CF Benchmarks' BRTI (a paid, real-time blend of the
+# major exchanges) averaged over the 60 seconds before open and before close.
+# We rebuild a free copy: the median mid-price of Coinbase, Kraken, Bitstamp and Gemini,
+# sampled every 2 seconds, with the same 60-second averaging.
+# ---------------------------------------------------------------------------
+import statistics
+import threading
+from collections import deque
+from concurrent.futures import ThreadPoolExecutor
+
+
+def _mid(bid, ask, last=None):
+    b, a = float(bid or 0), float(ask or 0)
+    if b > 0 and a > 0 and a >= b:
+        return (a + b) / 2
+    return float(last) if last else None
+
+
+BTC_SOURCES = {
+    "Coinbase": ("https://api.exchange.coinbase.com/products/BTC-USD/ticker",
+                 lambda j: _mid(j.get("bid"), j.get("ask"), j.get("price"))),
+    "Kraken":   ("https://api.kraken.com/0/public/Ticker?pair=XBTUSD",
+                 lambda j: (lambda r: _mid(r["b"][0], r["a"][0], r["c"][0]))(next(iter(j["result"].values())))),
+    "Bitstamp": ("https://www.bitstamp.net/api/v2/ticker/btcusd/",
+                 lambda j: _mid(j.get("bid"), j.get("ask"), j.get("last"))),
+    "Gemini":   ("https://api.gemini.com/v1/pubticker/btcusd",
+                 lambda j: _mid(j.get("bid"), j.get("ask"), j.get("last"))),
+}
+
+
+class BtcComposite:
+    """Background sampler. One per process. Thread-safe reads."""
+
+    def __init__(self, session=None, interval=2.0, start=True):
+        self.s = session or requests.Session()
+        self.interval = interval
+        self.samples = deque(maxlen=int(3 * 3600 / interval))   # 3 hours of history
+        self.last_sources = {}
+        self.lock = threading.Lock()
+        self.pool = ThreadPoolExecutor(max_workers=len(BTC_SOURCES))
+        if start:
+            threading.Thread(target=self._loop, daemon=True, name="btc-composite").start()
+
+    def _fetch(self, name):
+        url, parse = BTC_SOURCES[name]
+        try:
+            j = self.s.get(url, headers=UA, timeout=1.8).json()
+            v = parse(j)
+            return name, (v if v and v > 1000 else None)
+        except Exception:
+            return name, None
+
+    def sample_once(self, ts=None):
+        got = dict(self.pool.map(self._fetch, BTC_SOURCES))
+        prices = [v for v in got.values() if v]
+        if len(prices) >= 2:
+            med = statistics.median(prices)
+            # drop any exchange more than 0.3% away from the others (bad tick / outage)
+            good = [p for p in prices if abs(p / med - 1) < 0.003] or prices
+            px = statistics.median(good)
+            with self.lock:
+                self.samples.append((ts or time.time(), px, len(good), max(good) - min(good)))
+                self.last_sources = got
+        return got
+
+    def _loop(self):
+        while True:
+            t0 = time.time()
+            try:
+                self.sample_once()
+            except Exception as e:
+                print(f"[btc] sampler error: {e}")
+            time.sleep(max(0.2, self.interval - (time.time() - t0)))
+
+    def add(self, ts, price, n=4, spread=0.0):          # used by tests
+        with self.lock:
+            self.samples.append((ts, price, n, spread))
+
+    def avg(self, end_ts, seconds=60):
+        """Simple average of samples in (end_ts - seconds, end_ts] — the Kalshi settlement method."""
+        with self.lock:
+            xs = [p for t, p, _, _ in self.samples if end_ts - seconds < t <= end_ts]
+        return (sum(xs) / len(xs), len(xs)) if xs else (None, 0)
+
+    def minute_closes(self, minutes):
+        """Last price in each of the past `minutes` minutes, oldest first."""
+        now = time.time()
+        with self.lock:
+            snap = list(self.samples)
+        out = []
+        for k in range(minutes, -1, -1):
+            edge = now - k * 60
+            before = [p for t, p, _, _ in snap if t <= edge]
+            if before:
+                out.append(before[-1])
+        return out
+
+    def latest(self):
+        with self.lock:
+            return self.samples[-1] if self.samples else None
+
+
+_btc = None
+
+
+def btc_composite():
+    global _btc
+    if _btc is None:
+        _btc = BtcComposite()
+    return _btc
+
+
+def brti(symbol, lookback_min, session=None):
+    """BTC price for the engine: BRTI-style composite + volatility/momentum history.
+    Until we have our own history, Coinbase 1-min candles are shifted onto the composite level."""
+    comp = btc_composite()
+    last = comp.latest()
+    if not last:
+        time.sleep(2.5)                      # first call right after start-up
+        last = comp.latest()
+    if not last:
+        return None
+    ts, px, n_src, spread = last
+    own = comp.minute_closes(lookback_min)
+    if len(own) >= lookback_min:             # enough of our own history
+        closes = own
+    else:
+        cb = coinbase("BTC-USD", lookback_min, session)
+        shift = px - cb["price"]
+        closes = [c + shift for c in cb["closes"]]
+    closes = closes[:-1] + [px] if closes else [px]
+    avg60, n60 = comp.avg(time.time(), 60)
+    return {"price": px, "age_sec": time.time() - ts, "sigma_1m": _sigma(closes), "closes": closes,
+            "sources": n_src, "spread": spread, "avg60": avg60, "source": "BRTI estimate"}
+
+
+FEEDS = {"coinbase": coinbase, "yahoo": yahoo, "brti": brti}
 
 
 def get_price(feed, symbol, lookback_min, session=None):
