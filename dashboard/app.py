@@ -265,25 +265,28 @@ def sheet_csv(token):
     rows = [dict(r) for r in conn.execute("SELECT * FROM trades ORDER BY ts DESC LIMIT 5000")]
     buf = io.StringIO()
     w = csv.writer(buf)
-    w.writerow(["Time", "Mode", "Market", "Call", "Bought", "Qty", "Price", "Odds", "Edge",
-                "Time left", "Result", "P&L"])
+    # Column order is fixed: the sheet's color rules point at D, E, K and L.
+    # Time and Time left are written as plain text so Google Sheets shows them as-is.
+    w.writerow(["Time", "Mode", "Market", "Call", "Bought", "Qty", "Price", "Odds %", "Edge",
+                "Time left", "Result", "P&L", "Momentum"])
     for r in rows:
         fair = r.get("fair")
         odds = None if fair is None else (fair if r["side"] == "yes" else 1 - fair)
         ml = r.get("minutes_left")
         w.writerow([
-            datetime.fromtimestamp(r["ts"], TZ).strftime("%Y-%m-%d %H:%M"),
+            datetime.fromtimestamp(r["ts"], TZ).strftime("%a %b %d · %I:%M %p"),
             r["mode"].upper(),
             ASSET_LABEL.get(r["asset"], r["asset"] or ""),
             r.get("direction") or "",
             r["side"].upper(),
             int(r["contracts"]) if float(r["contracts"]).is_integer() else r["contracts"],
             f'{r["price"]:.2f}',
-            "" if odds is None else f"{odds * 100:.0f}%",
+            "" if odds is None else round(odds * 100),
             "" if r.get("edge") is None else f'{r["edge"]:.3f}',
-            "" if ml is None else f"{int(ml)}:{int(round((ml % 1) * 60)):02d}",
+            "" if ml is None else f"{round(ml * 60) // 60}m {round(ml * 60) % 60:02d}s",
             r["status"].upper(),
             "" if r.get("pnl") is None else f'{r["pnl"]:.2f}',
+            "" if r.get("mom_z") is None else f'{abs(r["mom_z"]):.2f}',
         ])
     return Response(buf.getvalue(), mimetype="text/csv",
                     headers={"Cache-Control": "no-store"})

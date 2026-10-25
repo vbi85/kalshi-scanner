@@ -135,6 +135,8 @@
   .tag{font-size:11px;font-weight:700;padding:2px 8px;border-radius:6px;background:#1a1a1d}
   .tag.live{background:#06240f;color:var(--green)}
   .tag.won{color:var(--green)} .tag.lost{color:var(--red)} .tag.open{color:var(--blue)}
+  table.vt{min-width:0} .vt td small{display:block;color:var(--dim);font-size:12px;white-space:normal}
+  .vt tr.lead td{background:#06180c}
   .errors{color:var(--amber);font-size:13px;white-space:pre-wrap}
   .empty{padding:22px;color:var(--dim);text-align:center}
   @media (max-width:600px){
@@ -233,6 +235,13 @@
     <div class="card kpi"><div class="label">Kalshi balance</div><div class="val" id="bal">—</div><div class="sub" id="balSub"></div></div>
     <div class="card kpi"><div class="label">Trades today</div><div class="val" id="sigToday">0</div><div class="sub" id="openPos"></div></div>
   </div>
+
+  <h2>Strategy test — 5 settings paper-trading side by side</h2>
+  <div class="tablewrap"><table class="vt">
+    <thead><tr><th>#</th><th>Strategy</th><th>Trades</th><th>Win %</th><th>P&amp;L</th><th class="hm">Per trade</th></tr></thead>
+    <tbody id="variants"></tbody>
+  </table></div>
+  <div class="muted" id="vnote" style="font-size:13px;margin-top:8px"></div>
 
   <h2>Approval gates — live trading unlocks per market when every box is green</h2>
   <div class="grid gates" id="gates"></div>
@@ -419,6 +428,17 @@ async function load(){
       ${x.checks.map(c=>`<div class="check"><span><span class="tick ${c.ok?'pos':'neg'}">${c.ok?'✓':'✗'}</span>${esc(c.name)}</span>
         <span class="v">${esc(c.value)} <span class="muted">/ ${esc(c.target)}</span></span></div>`).join('')}</details>`;
   }).join('') : '<div class="card empty">Waiting for first scan…</div>';
+
+  const V = s.variants||[], minN = V.length ? Math.min(...V.map(v=>v.trades)) : 0;
+  $('variants').innerHTML = V.length ? V.map((v,i)=>`<tr class="${i===0&&minN>=30?'lead':''}">
+    <td>${i+1}</td><td><b>${esc(v.id)} · ${esc(v.name)}</b><small>${esc(v.what)}</small></td>
+    <td>${v.trades}${v.open?` <span class="muted">+${v.open}</span>`:''}</td>
+    <td>${v.win_rate==null?'—':v.win_rate+'%'}</td>
+    <td class="${cls(v.pnl)}">${money(v.pnl)}</td>
+    <td class="hm ${cls(v.per_trade)}">${v.per_trade==null?'—':(v.per_trade>0?'+':'')+v.per_trade.toFixed(3)}</td></tr>`).join('')
+    : '<tr><td colspan="6" class="empty">Starts with the next trade window.</td></tr>';
+  $('vnote').textContent = minN>=30 ? 'Ranked by profit. Green row = current leader (every strategy has 30+ trades).'
+    : `Ranked by profit. Too early to pick a winner — wait until every strategy has 30+ trades (lowest now: ${minN}).`;
 
   const t = s.recent||[];
   $('trades').innerHTML = t.length ? t.map(r=>`<tr>

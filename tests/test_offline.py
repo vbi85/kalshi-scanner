@@ -455,7 +455,53 @@ def test_google_sheet_feed(cfg):
     assert c.get("/sheet/wrong-token.csv").status_code == 404
     body = c.get("/" + path).data.decode()
     lines = body.strip().splitlines()
-    assert lines[0] == "Time,Mode,Market,Call,Bought,Qty,Price,Odds,Edge,Time left,Result,P&L"
-    assert ",PAPER,BTC,UP,YES,1," in lines[1] and lines[1].endswith(",WON,0.42")   # 1 - 0.56 entry - 0.02 fee
+    assert lines[0] == "Time,Mode,Market,Call,Bought,Qty,Price,Odds %,Edge,Time left,Result,P&L,Momentum"
+    assert ",PAPER,BTC,UP,YES,1,0.56,75," in lines[1] and ",WON,0.42," in lines[1]   # 1 - 0.56 entry - 0.02 fee
+    assert " · " in lines[1].split(",")[0] and "m " in lines[1].split(",")[9]
     new = c.get("/api/sheet-link?new=1").get_json()["url"]
     assert new != url and c.get("/" + path).status_code == 404     # old link dead after rotate
+
+
+
+# ---------------- side-by-side strategy test ----------------
+def test_variants_trade_same_window_with_their_own_rules(cfg):
+    from scanner import variants
+    # price 0.80: the 75¢ cap (B, E) must skip it; A and C trade it
+    e, pub, _ = run(cfg, [mk("KXBTC15M-V", 99_700, 0.80, 0.75, minutes=6)])
+    rows = db.shadow_all(e.c)
+    got = {r["variant"] for r in rows}
+    assert {"A", "C"} <= got and "B" not in got and "E" not in got
+    a = next(r for r in rows if r["variant"] == "A")
+    main = db.recent(e.c)
+    assert main and main[0]["side"] == a["side"] and abs(main[0]["price"] - a["price"]) < 1e-9  # A mirrors main bot
+    e.cycle()
+    assert len(db.shadow_all(e.c)) == len(rows)            # still one trade per variant per window
+    pub.results["KXBTC15M-V"] = "yes"
+    e.cycle()
+    st = {v["id"]: v for v in db.get(e.c, "state")["variants"]}
+    assert st["A"]["trades"] == 1 and st["A"]["win_rate"] == 100.0 and st["A"]["pnl"] > 0
+    assert st["B"]["trades"] == 0
+    assert len(st) == len(variants.VARIANTS)
+
+
+def test_variants_skip_outside_window_and_never_touch_gates(cfg):
+    e, _, _ = run(cfg, [mk("KXBTC15M-W", 99_900, 0.55, 0.50, minutes=10)])   # 10 min left: too early
+    assert db.shadow_all(e.c) == []
+    e2, _, _ = run(cfg, [mk("KXBTC15M-X", 99_900, 0.55, 0.50, minutes=6)])
+    assert db.shadow_all(e2.c)
+    assert len(db.settled(e2.c, "paper", "BTC")) == 0      # gates read only the main bot's trades
+
+
+def test_edge_variant_is_stricter():
+    from scanner import variants
+    from scanner.config import Config
+    c = Config()
+    m = {"strike_type": "greater_or_equal", "floor_strike": 100_000}
+    q = {"yes_ask": 0.44, "yes_ask_size": 50, "no_ask": 0.60, "no_ask_size": 50}
+    px = {"price": 100_010.0, "sigma_1m": 0.0008}
+    mom = {"dir": "UP", "z": 1.0, "r1": 0.0001, "drift_1m": 0.0001}
+    res = {v["id"]: variants.decide(variants.params(c, v), m, q, px, mom, 6, 5.33, "yes", 1.0)
+           for v in variants.VARIANTS}
+    edge = res["A"]["edge"]
+    assert 0.05 <= edge < 0.08 and res["C"] is None          # A trades a 5-8¢ edge, C refuses
+    assert res["D"]["edge"] < res["A"]["edge"]                 # calmer odds = less confident

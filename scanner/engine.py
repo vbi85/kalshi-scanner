@@ -16,7 +16,7 @@ import traceback
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
-from . import db, gates, prices
+from . import db, gates, prices, variants
 from .alerts import Alerter
 from .config import ASSET_LABEL, ASSET_ORDER, ASSETS, Config
 from .kalshi import KalshiPublic, KalshiTrader, parse_time, quote
@@ -215,6 +215,9 @@ class Engine:
                    conf=fair if side == "yes" else 1 - fair,
                    price=q[f"{side}_ask"] or None, size=q[f"{side}_ask_size"], edge=e)
 
+        if cfg.entry_end_min <= mins <= cfg.entry_start_min and row["close_ts"]:
+            self.run_variants(m, info, q, px, mom, mins, mins_eff, usd, row["close_ts"])
+
         if pos:
             row["status"], row["note"] = "IN TRADE", f"holding {pos['side'].upper()} @ {pos['price']:.2f}"
         elif mins > cfg.entry_start_min:
@@ -278,11 +281,20 @@ class Engine:
         else:
             r["note"] += " · live order not filled (price moved)"
 
+    def run_variants(self, m, info, q, px, mom, mins, mins_eff, usd, close_ts):
+        fee_mult = info.get("fee_multiplier", 1.0)
+        for v in variants.VARIANTS:
+            t = variants.decide(variants.params(self.cfg, v), m, q, px, mom, mins, mins_eff, usd, fee_mult)
+            if t:
+                db.shadow_record(self.c, ts=time.time(), variant=v["id"], asset=info["asset"],
+                                 ticker=m["ticker"], close_ts=close_ts, **t)
+
     def settle_open(self):
         open_t = db.open_trades(self.c)
-        if not open_t:
+        open_s = db.shadow_open(self.c)
+        if not open_t and not open_s:
             return
-        tickers = sorted({t["ticker"] for t in open_t})
+        tickers = sorted({t["ticker"] for t in open_t} | {t["ticker"] for t in open_s})
         try:
             mk = {m["ticker"]: m for m in self.pub.markets_by_tickers(tickers)}
         except Exception as e:
@@ -301,6 +313,15 @@ class Engine:
                                      f"{t['side'].upper()} @{t['price']:.2f}", force=True)
             elif m.get("status") in ("finalized", "settled"):
                 db.void(self.c, t["id"])
+        for t in open_s:
+            m = mk.get(t["ticker"])
+            if not m:
+                continue
+            res = (m.get("result") or "").lower()
+            if res in ("yes", "no"):
+                db.shadow_settle(self.c, t["id"], res)
+            elif m.get("status") in ("finalized", "settled"):
+                db.shadow_void(self.c, t["id"])
         self.check_loss_streak()
 
     def update_gates(self):
@@ -350,6 +371,7 @@ class Engine:
                        for a, p in prices.items()},
             "errors": self.errors,
             "accuracy": {"BTC": self.accuracy_stats()},
+            "variants": variants.stats(db.shadow_all(self.c)),
             "settings": {"entry_start": self.cfg.entry_start_min, "entry_end": self.cfg.entry_end_min,
                          "min_edge": self.cfg.min_edge, "mom_min_z": self.cfg.mom_min_z,
                          "max_dollars": self.cfg.max_dollars_per_trade, "max_daily_loss": self.cfg.max_daily_loss},

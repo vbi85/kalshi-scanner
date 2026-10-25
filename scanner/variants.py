@@ -1,0 +1,63 @@
+"""Side-by-side strategy test.
+
+Every variant paper-trades the SAME markets in the SAME windows, so results are directly
+comparable. Variants never place real orders and never affect the approval gates —
+the bot's main strategy (and live trading) is untouched.
+To change what is tested, edit VARIANTS below and run kalshi-update.
+"""
+from .model import edges, fair_yes, taker_fee
+
+VARIANTS = [
+    {"id": "A", "name": "Current",     "what": "Today's settings (baseline)", "over": {}},
+    {"id": "B", "name": "Max 75¢",     "what": "Skip trades priced above 75¢", "over": {"max_price": 0.75}},
+    {"id": "C", "name": "Edge 8¢",     "what": "Minimum edge 8¢ (was 5¢)", "over": {"min_edge": 0.08}},
+    {"id": "D", "name": "Calmer odds", "what": "Volatility ×1.5, momentum weight 0.15",
+     "over": {"vol_mult": 1.5, "mom_weight": 0.15}},
+    {"id": "E", "name": "All three",   "what": "B + C + D together",
+     "over": {"max_price": 0.75, "min_edge": 0.08, "vol_mult": 1.5, "mom_weight": 0.15}},
+]
+
+KEYS = ("min_edge", "max_price", "min_price", "vol_mult", "mom_weight", "mom_min_z", "min_ask_size", "slippage")
+
+
+def params(cfg, variant):
+    p = {k: getattr(cfg, k) for k in KEYS}
+    p.update(variant["over"])
+    return p
+
+
+def decide(p, m, q, px, mom, mins, mins_eff, usd, fee_mult):
+    """Return a trade dict if this variant would trade right now, else None.
+    Caller has already checked: inside the 7:30–2:00 window, live price, momentum available."""
+    if abs(mom["z"]) < p["mom_min_z"] or mom["r1"] * mom["drift_1m"] < 0:
+        return None
+    drift = p["mom_weight"] * mom["drift_1m"]
+    fair = fair_yes(m, px["price"], px["sigma_1m"], mins_eff, p["vol_mult"], drift)
+    if fair is None:
+        return None
+    side = usd if mom["dir"] == "UP" else ("no" if usd == "yes" else "yes")
+    e = edges(fair, q, fee_mult, p["slippage"]).get(side)
+    price, size = q[f"{side}_ask"], q[f"{side}_ask_size"]
+    if e is None or not price or not (p["min_price"] <= price <= p["max_price"]):
+        return None
+    if size < p["min_ask_size"] or e < p["min_edge"]:
+        return None
+    fill = round(min(0.99, price + p["slippage"]), 4)          # same paper fill rule as the main bot
+    return {"side": side, "price": fill, "fee": taker_fee(fill, 1, fee_mult), "fair": round(fair, 4),
+            "edge": round(e, 4), "direction": mom["dir"], "mom_z": round(mom["z"], 3),
+            "minutes_left": round(mins, 2)}
+
+
+def stats(rows):
+    """rows: all shadow trades. Returns one summary per variant, best P&L first."""
+    out = []
+    for v in VARIANTS:
+        mine = [r for r in rows if r["variant"] == v["id"]]
+        done = [r for r in mine if r["status"] in ("won", "lost")]
+        wins = sum(1 for r in done if r["status"] == "won")
+        pnl = sum(r["pnl"] for r in done)
+        out.append({"id": v["id"], "name": v["name"], "what": v["what"], "trades": len(done),
+                    "open": sum(1 for r in mine if r["status"] == "open"),
+                    "win_rate": round(100 * wins / len(done), 1) if done else None,
+                    "pnl": round(pnl, 2), "per_trade": round(pnl / len(done), 3) if done else None})
+    return sorted(out, key=lambda s: (s["trades"] == 0, -s["pnl"]))

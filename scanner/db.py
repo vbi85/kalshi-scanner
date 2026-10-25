@@ -23,6 +23,15 @@ CREATE TABLE IF NOT EXISTS trades (
 );
 CREATE INDEX IF NOT EXISTS ix_trades_status ON trades(status);
 CREATE TABLE IF NOT EXISTS kv (k TEXT PRIMARY KEY, v TEXT, ts REAL);
+CREATE TABLE IF NOT EXISTS shadow (            -- side-by-side strategy test (paper only)
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts REAL NOT NULL, variant TEXT NOT NULL, asset TEXT, ticker TEXT NOT NULL, close_ts REAL,
+    side TEXT NOT NULL, direction TEXT, price REAL NOT NULL, fee REAL NOT NULL DEFAULT 0,
+    fair REAL, edge REAL, mom_z REAL, minutes_left REAL,
+    status TEXT NOT NULL DEFAULT 'open', pnl REAL, settled_ts REAL,
+    UNIQUE(variant, asset, close_ts)            -- one trade per variant per market window
+);
+CREATE INDEX IF NOT EXISTS ix_shadow_status ON shadow(status);
 """
 
 
@@ -104,3 +113,37 @@ def settled(c, mode=None, asset=None):
 
 def recent(c, limit=50):
     return [dict(r) for r in c.execute("SELECT * FROM trades ORDER BY ts DESC LIMIT ?", (limit,))]
+
+
+# ---------------- side-by-side strategy test ----------------
+def shadow_record(c, **t):
+    try:
+        c.execute(f"INSERT INTO shadow({','.join(t)}) VALUES({','.join('?' for _ in t)})", tuple(t.values()))
+        c.commit()
+        return True
+    except sqlite3.IntegrityError:
+        return False
+
+
+def shadow_open(c):
+    return [dict(r) for r in c.execute("SELECT * FROM shadow WHERE status='open'")]
+
+
+def shadow_settle(c, row_id, result):
+    t = c.execute("SELECT * FROM shadow WHERE id=?", (row_id,)).fetchone()
+    if not t:
+        return
+    won = result == t["side"]
+    pnl = ((1 - t["price"]) if won else -t["price"]) - t["fee"]
+    c.execute("UPDATE shadow SET status=?, pnl=?, settled_ts=? WHERE id=?",
+              ("won" if won else "lost", round(pnl, 4), time.time(), row_id))
+    c.commit()
+
+
+def shadow_void(c, row_id):
+    c.execute("UPDATE shadow SET status='void', pnl=0, settled_ts=? WHERE id=?", (time.time(), row_id))
+    c.commit()
+
+
+def shadow_all(c):
+    return [dict(r) for r in c.execute("SELECT * FROM shadow ORDER BY ts")]
