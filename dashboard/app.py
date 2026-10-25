@@ -239,6 +239,56 @@ def resume():
     return jsonify(ok=True)
 
 
+# ---------------- Google Sheet feed ----------------
+# The sheet pulls /sheet/<secret>.csv with =IMPORTDATA(). The secret link is the only key,
+# so it is long and random, and can be replaced from the dashboard at any time.
+def _sheet_token(rotate=False):
+    t = None if rotate else db.get(conn, "sheet_token")
+    if not t:
+        t = secrets.token_urlsafe(24)
+        db.put(conn, "sheet_token", t)
+    return t
+
+
+@app.get("/api/sheet-link")
+@auth
+def sheet_link():
+    rotate = request.args.get("new") == "1"
+    return jsonify(url=f"{request.host_url.rstrip('/')}/sheet/{_sheet_token(rotate)}.csv")
+
+
+@app.get("/sheet/<token>.csv")
+def sheet_csv(token):
+    good = db.get(conn, "sheet_token")
+    if not good or not hmac.compare_digest(token, good):
+        return Response("not found", 404)
+    rows = [dict(r) for r in conn.execute("SELECT * FROM trades ORDER BY ts DESC LIMIT 5000")]
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    w.writerow(["Time", "Mode", "Market", "Call", "Bought", "Qty", "Price", "Odds", "Edge",
+                "Time left", "Result", "P&L"])
+    for r in rows:
+        fair = r.get("fair")
+        odds = None if fair is None else (fair if r["side"] == "yes" else 1 - fair)
+        ml = r.get("minutes_left")
+        w.writerow([
+            datetime.fromtimestamp(r["ts"], TZ).strftime("%Y-%m-%d %H:%M"),
+            r["mode"].upper(),
+            ASSET_LABEL.get(r["asset"], r["asset"] or ""),
+            r.get("direction") or "",
+            r["side"].upper(),
+            int(r["contracts"]) if float(r["contracts"]).is_integer() else r["contracts"],
+            f'{r["price"]:.2f}',
+            "" if odds is None else f"{odds * 100:.0f}%",
+            "" if r.get("edge") is None else f'{r["edge"]:.3f}',
+            "" if ml is None else f"{int(ml)}:{int(round((ml % 1) * 60)):02d}",
+            r["status"].upper(),
+            "" if r.get("pnl") is None else f'{r["pnl"]:.2f}',
+        ])
+    return Response(buf.getvalue(), mimetype="text/csv",
+                    headers={"Cache-Control": "no-store"})
+
+
 @app.get("/export.csv")
 @auth
 def export():

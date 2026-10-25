@@ -243,6 +243,16 @@
     <tbody id="trades"></tbody>
   </table></div>
 
+  <h2>Google Sheet</h2>
+  <div class="card">
+    <div class="muted" style="font-size:14px;margin-bottom:10px">Your "Kalshi Bot Trades" Google Sheet reads trades from this private link. Paste it into cell <b>B2</b> of the sheet once.</div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap">
+      <button class="btn2 btn-green" onclick="copySheetLink(false)">Copy Sheet link</button>
+      <button class="btn2" onclick="if(confirm('Make a new link? The old one stops working and you must paste the new one into the sheet.'))copySheetLink(true)">New link</button>
+    </div>
+    <div id="sheetMsg" class="muted" style="font-size:13px;margin-top:10px;word-break:break-all"></div>
+  </div>
+
   <h2>Health</h2>
   <div class="card"><div id="feeds" class="muted"></div><div id="errors" class="errors" style="margin-top:10px"></div></div>
   <p style="margin-top:18px"><a class="link" href="/logout">Sign out</a></p>
@@ -475,6 +485,14 @@ async function saveKey(){
 async function disconnectKey(){
   if (!confirm('Disconnect Kalshi? The key is deleted from your server and the bot goes back to PAPER.')) return;
   await post('/api/kalshi-key', null, 'DELETE'); closeSheet('keySheet'); load();
+}
+
+async function copySheetLink(rotate){
+  const res = await fetch('/api/sheet-link' + (rotate?'?new=1':''));
+  if (res.status === 401){ location.href='/login'; return; }
+  const {url} = await res.json();
+  try { await navigator.clipboard.writeText(url); $('sheetMsg').innerHTML = '<b class="pos">Copied.</b> Paste it into cell B2 of the sheet.<br>' + esc(url); }
+  catch(e){ $('sheetMsg').innerHTML = 'Press and hold to copy:<br><b style="color:var(--text)">' + esc(url) + '</b>'; }
 }
 
 async function toggleKill(){

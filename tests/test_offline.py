@@ -440,3 +440,22 @@ def test_accuracy_check_against_kalshi_target(cfg):
     assert st["accuracy"]["BTC"]["mae"] == 6.0
     btc_gate = e.gate_status["BTC"]["checks"][0]
     assert btc_gate["name"] == "Price matches Kalshi" and not btc_gate["ok"]   # needs 40 checks
+
+
+def test_google_sheet_feed(cfg):
+    e, pub, _ = run(cfg, [mk("KXBTC15M-S", 99_900, 0.55, 0.50)])
+    pub.results["KXBTC15M-S"] = "yes"
+    e.cycle()
+    import dashboard.app as dapp
+    dapp.conn = db.connect(cfg.db_path)
+    dapp.cfg.dash_password = ""
+    c = dapp.app.test_client()
+    url = c.get("/api/sheet-link").get_json()["url"]
+    path = url.split("://", 1)[1].split("/", 1)[1]
+    assert c.get("/sheet/wrong-token.csv").status_code == 404
+    body = c.get("/" + path).data.decode()
+    lines = body.strip().splitlines()
+    assert lines[0] == "Time,Mode,Market,Call,Bought,Qty,Price,Odds,Edge,Time left,Result,P&L"
+    assert ",PAPER,BTC,UP,YES,1," in lines[1] and lines[1].endswith(",WON,0.42")   # 1 - 0.56 entry - 0.02 fee
+    new = c.get("/api/sheet-link?new=1").get_json()["url"]
+    assert new != url and c.get("/" + path).status_code == 404     # old link dead after rotate
