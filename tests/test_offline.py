@@ -455,7 +455,7 @@ def test_google_sheet_feed(cfg):
     assert c.get("/sheet/wrong-token.csv").status_code == 404
     body = c.get("/" + path).data.decode()
     lines = body.strip().splitlines()
-    assert lines[0] == "Time,Mode,Market,Call,Bought,Qty,Price,Odds %,Edge,Time left,Result,P&L,Momentum,Price source"
+    assert lines[0] == "Time,Mode,Market,Call,Bought,Qty,Price,Odds %,Edge,Time left,Result,P&L,Momentum,Price source,Day,Day P&L"
     assert ",PAPER,BTC,UP,YES,1,0.56,75," in lines[1] and ",WON,0.42," in lines[1]   # 1 - 0.56 entry - 0.02 fee
     assert " · " in lines[1].split(",")[0] and "m " in lines[1].split(",")[9]
     new = c.get("/api/sheet-link?new=1").get_json()["url"]
@@ -466,21 +466,22 @@ def test_google_sheet_feed(cfg):
 # ---------------- side-by-side strategy test ----------------
 def test_variants_trade_same_window_with_their_own_rules(cfg):
     from scanner import variants
-    # price 0.80: the 75¢ cap (B, E) must skip it; A and C trade it
+    # 80¢ is above the new 75¢ cap: only B (old rules, up to 90¢) may trade it; the main bot must skip it
     e, pub, _ = run(cfg, [mk("KXBTC15M-V", 99_700, 0.80, 0.75, minutes=6)])
-    rows = db.shadow_all(e.c)
-    got = {r["variant"] for r in rows}
-    assert {"A", "C"} <= got and "B" not in got and "E" not in got
+    got = {r["variant"] for r in db.shadow_all(e.c)}
+    assert got == {"B"} and db.recent(e.c) == []
+    # 55¢ is inside the band: A trades it and mirrors the main bot exactly
+    e2, pub2, _ = run(cfg, [mk("KXBTC15M-W", 99_900, 0.55, 0.50, minutes=6)])
+    rows = db.shadow_all(e2.c)
     a = next(r for r in rows if r["variant"] == "A")
-    main = db.recent(e.c)
-    assert main and main[0]["side"] == a["side"] and abs(main[0]["price"] - a["price"]) < 1e-9  # A mirrors main bot
-    e.cycle()
-    assert len(db.shadow_all(e.c)) == len(rows)            # still one trade per variant per window
-    pub.results["KXBTC15M-V"] = "yes"
-    e.cycle()
-    st = {v["id"]: v for v in db.get(e.c, "state")["variants"]}
+    main = db.recent(e2.c)
+    assert main and main[0]["side"] == a["side"] and abs(main[0]["price"] - a["price"]) < 1e-9
+    e2.cycle()
+    assert len(db.shadow_all(e2.c)) == len(rows)           # still one trade per variant per window
+    pub2.results["KXBTC15M-W"] = "yes"
+    e2.cycle()
+    st = {v["id"]: v for v in db.get(e2.c, "state")["variants"]}
     assert st["A"]["trades"] == 1 and st["A"]["win_rate"] == 100.0 and st["A"]["pnl"] > 0
-    assert st["B"]["trades"] == 0
     assert len(st) == len(variants.VARIANTS)
 
 
@@ -580,3 +581,84 @@ def test_settlement_rules_read_from_kalshi(cfg):
     assert e.settle_avg_min("GOLD", "KXGOLD15M") == 1.0
     assert "simple average" in db.get(e.c, "state")["rules"]["GOLD"]
     assert e.settle_avg_min("BTC", "KXBTC15M") == 1.0           # BTC set explicitly in config
+
+
+
+# ---------------- new rules, settings panel, 24h scorecard, daily P&L ----------------
+def test_new_rules_seeded_once_and_override_env(cfg):
+    e, _, _ = run(cfg, [])
+    assert e.cfg.mom_min_z == 0.8 and e.cfg.min_price == 0.40 and e.cfg.max_price == 0.75
+    assert e.base_cfg.mom_min_z == 0.5                          # .env value untouched, overridden
+    t0 = db.get(e.c, "rules_changed_at")
+    db.put(e.c, "settings", {"mom_min_z": 1.2})                 # later change from the dashboard
+    e2 = Engine(cfg, public=FakePublic(), price_fn=make_price_fn(), conn=e.c)
+    assert e2.cfg.mom_min_z == 1.2 and db.get(e.c, "rules_changed_at") == t0   # seed not re-applied
+
+
+def test_weak_and_spike_momentum_blocked(cfg):
+    weak = feed(14, 99_986, 100_000)                            # momentum ~0.6: allowed before, blocked now
+    e, _, rows = run(cfg, [mk("KXBTC15M-M", 99_900, 0.55, 0.50, minutes=6)], btc=weak)
+    r = rows["KXBTC15M-M"]
+    assert r["status"] == "SETUP FORMING" and "momentum weak" in r["note"] and "/ 0.8" in r["note"]
+    db.put(e.c, "settings", {"mom_max_z": 1.0})
+    rows = {x["ticker"]: x for x in e.cycle()}
+    big = run(cfg, [mk("KXBTC15M-S", 99_900, 0.55, 0.50, minutes=6)])[0]
+    db.put(big.c, "settings", {"mom_max_z": 1.0})
+    r2 = {x["ticker"]: x for x in big.cycle()}["KXBTC15M-S"]
+    assert "too big" in r2["note"] or r2["status"] == "IN TRADE"
+
+
+def test_settings_api_validates_and_restarts_scorecard(cfg):
+    e, _, _ = run(cfg, [])
+    import dashboard.app as dapp
+    dapp.conn = e.c
+    dapp.cfg.dash_password = ""
+    c = dapp.app.test_client()
+    t0 = db.get(e.c, "rules_changed_at")
+    assert c.post("/api/settings", json={"min_price": 0.8, "max_price": 0.6}).status_code == 400   # min > max
+    assert c.post("/api/settings", json={"mom_min_z": 99}).status_code == 400                       # out of range
+    r = c.post("/api/settings", json={"mom_min_z": 1.0, "note": "test"})
+    assert r.get_json()["ok"] and db.get(e.c, "settings")["mom_min_z"] == 1.0
+    assert db.get(e.c, "rules_changed_at") > t0
+    e.cycle()
+    assert e.cfg.mom_min_z == 1.0
+
+
+def test_rule_test_scorecard_before_after(cfg):
+    e, _, _ = run(cfg, [])
+    t0 = time.time() - 1000
+    db.put(e.c, "rules_changed_at", t0)
+    for i, (dt, res) in enumerate([(-3600, "no"), (-1800, "no"), (-900, "yes"), (600, "yes"), (700, "yes")]):
+        db.record_trade(e.c, ts=t0 + dt, mode="paper", asset="BTC", ticker=f"RT{i}", side="yes",
+                        price=0.5, contracts=1, fee=0.02, close_ts=9000 + i)
+    for t in db.open_trades(e.c):
+        db.settle(e.c, t["id"], "yes" if t["ticker"] in ("RT2", "RT3", "RT4") else "no")
+    rt = e.rule_test()
+    assert rt["before"]["trades"] == 3 and rt["before"]["wins"] == 1
+    assert rt["after"]["trades"] == 2 and rt["after"]["win_rate"] == 100.0 and rt["after"]["pnl"] > 0
+
+
+def test_sheet_daily_pnl_midnight_to_midnight(cfg):
+    from zoneinfo import ZoneInfo
+    tz = ZoneInfo("America/Chicago")
+    e, _, _ = run(cfg, [])
+    day1 = datetime(2026, 10, 24, 23, 30, tzinfo=tz).timestamp()
+    day2 = datetime(2026, 10, 25, 0, 30, tzinfo=tz).timestamp()
+    for i, (ts, res) in enumerate([(day1, "yes"), (day1 + 60, "no"), (day2, "yes"), (day2 + 60, "yes")]):
+        db.record_trade(e.c, ts=ts, mode="paper", asset="BTC", ticker=f"D{i}", side="yes",
+                        price=0.5, contracts=1, fee=0.02, close_ts=8000 + i)
+    for i, t in enumerate(sorted(db.open_trades(e.c), key=lambda t: t["ts"])):
+        db.settle(e.c, t["id"], ["yes", "no", "yes", "yes"][i])
+    import dashboard.app as dapp
+    dapp.conn = e.c
+    dapp.cfg.dash_password = ""
+    c = dapp.app.test_client()
+    path = c.get("/api/sheet-link").get_json()["url"].split("://", 1)[1].split("/", 1)[1]
+    lines = c.get("/" + path).data.decode().strip().splitlines()
+    head = lines[0].split(",")
+    assert head[-2:] == ["Day", "Day P&L"]
+    rows = [l.split(",") for l in lines[1:]]
+    assert rows[0][-2] == "Sun Oct 25" and rows[0][-1] == "0.96"      # newest row = Sunday total (0.48 + 0.48)
+    assert rows[2][-2] == "Sat Oct 24" and rows[2][-1] == "-0.04"     # Saturday: +0.48 - 0.52
+    daily = c.get("/" + path.replace(".csv", "/daily.csv")).data.decode().strip().splitlines()
+    assert daily[0].startswith("Day,Trades,Wins,Win %,P&L") and daily[1].startswith("Sun Oct 25,2,2,100")

@@ -46,6 +46,7 @@ class Config:
     mom_lookback_min: int = int(_env("MOM_LOOKBACK_MIN", "5"))      # momentum measured over last 5 min
     mom_min_z: float = float(_env("MOM_MIN_Z", "0.5"))              # minimum momentum strength (std devs)
     mom_weight: float = float(_env("MOM_WEIGHT", "0.25"))           # how much momentum carries forward
+    mom_max_z: float = float(_env("MOM_MAX_Z", "0"))                # 0 = no cap; e.g. 2.0 skips big spikes
     min_edge: float = float(_env("MIN_EDGE", "0.05"))           # $ per contract after fees + slippage
     min_ask_size: float = float(_env("MIN_ASK_SIZE", "5"))
     min_price: float = float(_env("MIN_PRICE", "0.05"))         # skip lottery tickets
@@ -134,3 +135,20 @@ def classify_asset(text: str):
         if any(re.search(p, t) for p in spec["patterns"]):
             return asset
     return None
+
+
+# Settings you can change from the dashboard (saved on the server, override .env).
+# name: (label, min, max, step)
+EDITABLE = {
+    "mom_min_z":  ("Momentum minimum", 0.0, 5.0, 0.1),
+    "mom_max_z":  ("Momentum maximum (0 = no cap)", 0.0, 10.0, 0.1),
+    "min_price":  ("Lowest price to buy (¢ as 0.xx)", 0.01, 0.99, 0.01),
+    "max_price":  ("Highest price to buy (¢ as 0.xx)", 0.01, 0.99, 0.01),
+    "min_edge":   ("Minimum edge ($ per contract)", 0.0, 0.50, 0.01),
+    "vol_mult":   ("Volatility multiplier", 0.5, 3.0, 0.05),
+    "mom_weight": ("Momentum weight", 0.0, 1.0, 0.05),
+}
+
+# One-time rule change applied on update (Oct 25, 2026): momentum 0.8+, prices 40¢–75¢
+SEED_SETTINGS = {"id": "2026-10-25-momentum-0.8-price-40-75",
+                 "values": {"mom_min_z": 0.8, "min_price": 0.40, "max_price": 0.75}}

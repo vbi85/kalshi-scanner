@@ -19,7 +19,7 @@ from zoneinfo import ZoneInfo
 
 from . import db, gates, prices, variants
 from .alerts import Alerter
-from .config import ASSET_LABEL, ASSET_ORDER, ASSETS, Config
+from .config import ASSET_LABEL, ASSET_ORDER, ASSETS, EDITABLE, SEED_SETTINGS, Config
 from .kalshi import KalshiPublic, KalshiTrader, parse_time, quote
 from .model import edges, fair_yes, momentum, taker_fee, up_side
 from .prices import get_price
@@ -62,8 +62,9 @@ def mmss(minutes):
 
 
 class Engine:
-    def __init__(self, cfg: Config, public=None, trader=None, price_fn=None, conn=None, btc=None):
+    def __init__(self, cfg: Config, public=None, trader=None, price_fn=None, conn=None, btc=None, seed=True):
         self.cfg = cfg
+        self.base_cfg = cfg
         self._comp_override = {"BTC": btc} if btc else {}   # tests pass fake samplers
         self.rules = {}                        # series -> Kalshi settlement rules text
         self._checked_open = set()
@@ -75,6 +76,12 @@ class Engine:
         self._last_mode = None
         self.price_fn = price_fn or get_price
         self.c = conn or db.connect(cfg.db_path)
+        if seed:
+            self.seed_settings()
+        self.apply_settings()
+        if db.get(self.c, "variant_set") != variants.VARIANT_SET:      # new test line-up -> fresh counts
+            db.put(self.c, "variant_set", variants.VARIANT_SET)
+            db.put(self.c, "variant_since", time.time())
         self.alerts = Alerter(cfg)
         self.series = {}
         self.last_discover = 0
@@ -119,6 +126,42 @@ class Engine:
                               "ORDER BY settled_ts DESC LIMIT ?", (n,)).fetchall()
         if len(last) == n and all(r["status"] == "lost" for r in last):
             self.kill(f"{n} live losses in a row")
+
+    # ---------------- settings from the dashboard ----------------
+    def seed_settings(self):
+        """Apply a one-time rule change shipped with an update (only once per server)."""
+        if db.get(self.c, "settings_seed") == SEED_SETTINGS["id"]:
+            return
+        cur = db.get(self.c, "settings") or {}
+        cur.update(SEED_SETTINGS["values"])
+        db.put(self.c, "settings", cur)
+        db.put(self.c, "settings_seed", SEED_SETTINGS["id"])
+        db.put(self.c, "rules_changed_at", time.time())
+        db.put(self.c, "rules_changed_what", "Momentum 0.8+, prices 40¢–75¢")
+
+    def rule_test(self, hours=24):
+        """Before/after scorecard for the last rule change: 24h before it vs everything since."""
+        t0 = db.get(self.c, "rules_changed_at")
+        if not t0:
+            return None
+
+        def summary(rows):
+            done = [r for r in rows if r["status"] in ("won", "lost")]
+            wins = sum(1 for r in done if r["status"] == "won")
+            return {"trades": len(done), "wins": wins,
+                    "win_rate": round(100 * wins / len(done), 1) if done else None,
+                    "pnl": round(sum(r["pnl"] for r in done), 2),
+                    "open": sum(1 for r in rows if r["status"] == "open")}
+        q = "SELECT * FROM trades WHERE mode='paper' AND ts>=? AND ts<?"
+        before = [dict(r) for r in self.c.execute(q, (t0 - hours * 3600, t0))]
+        after = [dict(r) for r in self.c.execute(q, (t0, time.time() + 1))]
+        return {"what": db.get(self.c, "rules_changed_what") or "", "since": t0, "hours": hours,
+                "elapsed_h": round((time.time() - t0) / 3600, 1),
+                "before": summary(before), "after": summary(after)}
+
+    def apply_settings(self):
+        over = {k: float(v) for k, v in (db.get(self.c, "settings") or {}).items() if k in EDITABLE}
+        self.cfg = dataclasses.replace(self.base_cfg, **over) if over else self.base_cfg
 
     def mode(self):
         """Paper/Live switch from the dashboard wins; .env TRADING_MODE is only the default."""
@@ -265,6 +308,8 @@ class Engine:
             row["status"], row["note"] = "CLOSED", f"no new trades under {mmss(cfg.entry_end_min)}"
         elif abs(mom["z"]) < cfg.mom_min_z:
             row["status"], row["note"] = "SETUP FORMING", f"momentum weak ({abs(mom['z']):.2f} / {cfg.mom_min_z:g})"
+        elif cfg.mom_max_z and abs(mom["z"]) > cfg.mom_max_z:
+            row["status"], row["note"] = "SETUP FORMING", f"move too big — likely to reverse ({abs(mom['z']):.2f} > {cfg.mom_max_z:g})"
         elif mom["r1"] * mom["drift_1m"] < 0:
             row["status"], row["note"] = "SETUP FORMING", "momentum fading — last minute reversed"
         elif e is None or not row["price"]:
@@ -416,9 +461,13 @@ class Engine:
             "errors": self.errors,
             "accuracy": {a: self.accuracy_stats(a) for a in ("BTC", "GOLD")},
             "rules": {ASSETS_BY_SERIES.get(k, k): v[:300] for k, v in self.rules.items()},
-            "variants": variants.stats(db.shadow_all(self.c)),
+            "variants": variants.stats([r for r in db.shadow_all(self.c)
+                                        if r["ts"] >= (db.get(self.c, "variant_since") or 0)]),
+            "variant_since": db.get(self.c, "variant_since"),
+            "rule_test": self.rule_test(),
             "settings": {"entry_start": self.cfg.entry_start_min, "entry_end": self.cfg.entry_end_min,
                          "min_edge": self.cfg.min_edge, "mom_min_z": self.cfg.mom_min_z,
+                         **{k: getattr(self.cfg, k) for k in EDITABLE},
                          "max_dollars": self.cfg.max_dollars_per_trade, "max_daily_loss": self.cfg.max_daily_loss},
         })
 
@@ -463,6 +512,7 @@ class Engine:
                 "gap": round(-corr, 2), "last": hist[-1]}
 
     def cycle(self):
+        self.apply_settings()
         self.refresh_trader()
         self.watch_mode()
         self.discover()

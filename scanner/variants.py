@@ -7,17 +7,20 @@ To change what is tested, edit VARIANTS below and run kalshi-update.
 """
 from .model import edges, fair_yes, taker_fee
 
+# Change VARIANT_SET whenever the list changes: the dashboard then restarts the counts.
+VARIANT_SET = "v2-2026-10-25"
 VARIANTS = [
-    {"id": "A", "name": "Current",     "what": "Today's settings (baseline)", "over": {}},
-    {"id": "B", "name": "Max 75¢",     "what": "Skip trades priced above 75¢", "over": {"max_price": 0.75}},
-    {"id": "C", "name": "Edge 8¢",     "what": "Minimum edge 8¢ (was 5¢)", "over": {"min_edge": 0.08}},
-    {"id": "D", "name": "Calmer odds", "what": "Volatility ×1.5, momentum weight 0.15",
+    {"id": "A", "name": "Current",       "what": "Your live settings (now momentum 0.8+, 40¢–75¢)", "over": {}},
+    {"id": "B", "name": "Old rules",     "what": "Before tonight: momentum 0.5+, 5¢–90¢",
+     "over": {"mom_min_z": 0.5, "min_price": 0.05, "max_price": 0.90}},
+    {"id": "C", "name": "Edge 8¢",       "what": "Current + minimum edge 8¢", "over": {"min_edge": 0.08}},
+    {"id": "D", "name": "Calmer odds",   "what": "Current + volatility ×1.5, momentum weight 0.15",
      "over": {"vol_mult": 1.5, "mom_weight": 0.15}},
-    {"id": "E", "name": "All three",   "what": "B + C + D together",
-     "over": {"max_price": 0.75, "min_edge": 0.08, "vol_mult": 1.5, "mom_weight": 0.15}},
+    {"id": "E", "name": "No big spikes", "what": "Current + skip momentum above 2.0", "over": {"mom_max_z": 2.0}},
 ]
 
-KEYS = ("min_edge", "max_price", "min_price", "vol_mult", "mom_weight", "mom_min_z", "min_ask_size", "slippage")
+KEYS = ("min_edge", "max_price", "min_price", "vol_mult", "mom_weight", "mom_min_z", "mom_max_z",
+        "min_ask_size", "slippage")
 
 
 def params(cfg, variant):
@@ -30,6 +33,8 @@ def decide(p, m, q, px, mom, mins, mins_eff, usd, fee_mult):
     """Return a trade dict if this variant would trade right now, else None.
     Caller has already checked: inside the 7:30–2:00 window, live price, momentum available."""
     if abs(mom["z"]) < p["mom_min_z"] or mom["r1"] * mom["drift_1m"] < 0:
+        return None
+    if p.get("mom_max_z") and abs(mom["z"]) > p["mom_max_z"]:
         return None
     drift = p["mom_weight"] * mom["drift_1m"]
     fair = fair_yes(m, px["price"], px["sigma_1m"], mins_eff, p["vol_mult"], drift)

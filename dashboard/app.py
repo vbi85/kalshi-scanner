@@ -13,7 +13,7 @@ from flask import Flask, Response, jsonify, redirect, request, send_from_directo
 from werkzeug.middleware.proxy_fix import ProxyFix
 
 from scanner import db
-from scanner.config import ASSET_LABEL, Config
+from scanner.config import ASSET_LABEL, EDITABLE, Config
 
 cfg = Config()
 TZ = ZoneInfo(os.getenv("TZ_NAME", "America/Chicago"))
@@ -268,7 +268,13 @@ def sheet_csv(token):
     # Column order is fixed: the sheet's color rules point at D, E, K and L.
     # Time and Time left are written as plain text so Google Sheets shows them as-is.
     w.writerow(["Time", "Mode", "Market", "Call", "Bought", "Qty", "Price", "Odds %", "Edge",
-                "Time left", "Result", "P&L", "Momentum", "Price source"])
+                "Time left", "Result", "P&L", "Momentum", "Price source", "Day", "Day P&L"])
+    day_of = lambda r: datetime.fromtimestamp(r["ts"], TZ).strftime("%a %b %d")
+    day_total = {}
+    for r in rows:                                   # total settled P&L per day (midnight-midnight Central)
+        if r.get("pnl") is not None:
+            k = (r["mode"], day_of(r))
+            day_total[k] = day_total.get(k, 0.0) + r["pnl"]
     for r in rows:
         fair = r.get("fair")
         odds = None if fair is None else (fair if r["side"] == "yes" else 1 - fair)
@@ -288,9 +294,76 @@ def sheet_csv(token):
             "" if r.get("pnl") is None else f'{r["pnl"]:.2f}',
             "" if r.get("mom_z") is None else f'{abs(r["mom_z"]):.2f}',
             r.get("src") or "",
+            day_of(r),
+            f'{day_total.get((r["mode"], day_of(r)), 0.0):.2f}',
         ])
     return Response(buf.getvalue(), mimetype="text/csv",
                     headers={"Cache-Control": "no-store"})
+
+
+@app.get("/sheet/<token>/daily.csv")
+def sheet_daily_csv(token):
+    """One row per day (midnight-midnight Central), newest first. For a 'Daily' tab in the sheet."""
+    good = db.get(conn, "sheet_token")
+    if not good or not hmac.compare_digest(token, good):
+        return Response("not found", 404)
+    days = {}
+    for r in conn.execute("SELECT * FROM trades WHERE status IN ('won','lost') ORDER BY ts DESC"):
+        d = datetime.fromtimestamp(r["ts"], TZ)
+        key = d.strftime("%Y-%m-%d")
+        x = days.setdefault(key, {"label": d.strftime("%a %b %d"), "n": 0, "w": 0, "pnl": 0.0, "ln": 0, "lpnl": 0.0})
+        if r["mode"] == "live":
+            x["ln"] += 1; x["lpnl"] += r["pnl"]
+        else:
+            x["n"] += 1; x["w"] += r["status"] == "won"; x["pnl"] += r["pnl"]
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    w.writerow(["Day", "Trades", "Wins", "Win %", "P&L", "Live trades", "Live P&L"])
+    for key in sorted(days, reverse=True):
+        x = days[key]
+        w.writerow([x["label"], x["n"], x["w"], round(100 * x["w"] / x["n"]) if x["n"] else "",
+                    f'{x["pnl"]:.2f}', x["ln"], f'{x["lpnl"]:.2f}'])
+    return Response(buf.getvalue(), mimetype="text/csv", headers={"Cache-Control": "no-store"})
+
+
+# ---------------- settings from the phone ----------------
+@app.get("/api/settings")
+@auth
+def get_settings():
+    saved = db.get(conn, "settings") or {}
+    return jsonify(fields=[{"key": k, "label": v[0], "min": v[1], "max": v[2], "step": v[3],
+                            "value": saved.get(k, getattr(cfg, k))} for k, v in EDITABLE.items()])
+
+
+@app.post("/api/settings")
+@auth
+def save_settings():
+    body = request.get_json(silent=True) or {}
+    cur = dict(db.get(conn, "settings") or {})
+    changed = []
+    for k, v in body.items():
+        if k not in EDITABLE:
+            continue
+        label, lo, hi, _ = EDITABLE[k]
+        try:
+            v = round(float(v), 4)
+        except (TypeError, ValueError):
+            return jsonify(ok=False, error=f"{label}: not a number"), 400
+        if not lo <= v <= hi:
+            return jsonify(ok=False, error=f"{label}: must be between {lo:g} and {hi:g}"), 400
+        if cur.get(k, getattr(cfg, k)) != v:
+            changed.append(f"{label} {v:g}")
+        cur[k] = v
+    lo_p = cur.get("min_price", cfg.min_price)
+    hi_p = cur.get("max_price", cfg.max_price)
+    if lo_p >= hi_p:
+        return jsonify(ok=False, error="Lowest price must be below highest price"), 400
+    if not changed:
+        return jsonify(ok=True, changed=[])
+    db.put(conn, "settings", cur)
+    db.put(conn, "rules_changed_at", time.time())               # starts a fresh 24h before/after scorecard
+    db.put(conn, "rules_changed_what", (body.get("note") or ", ".join(changed))[:120])
+    return jsonify(ok=True, changed=changed)
 
 
 @app.get("/export.csv")
