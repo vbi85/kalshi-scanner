@@ -23,6 +23,14 @@ def _bool(name, default):
     return str(_env(name, default)).lower() in ("1", "true", "yes", "on")
 
 
+ALWAYS_SERIES = ["KXSILVER15M"]     # added Oct 26, 2026 even if an older .env list leaves it out
+
+
+def _series():
+    out = _list("SERIES", "KXBTC15M,KXGOLD15M,KXSILVER15M,KXWTI15M,KXNATGAS15M")
+    return out + [s for s in ALWAYS_SERIES if s not in out]
+
+
 @dataclass
 class Config:
     # ---------- Kalshi ----------
@@ -33,7 +41,7 @@ class Config:
     private_key_path: str = _env("KALSHI_PRIVATE_KEY_PATH", "")
 
     # ---------- What to scan ----------
-    series: list = field(default_factory=lambda: _list("SERIES", "KXBTC15M,KXGOLD15M,KXWTI15M,KXNATGAS15M"))
+    series: list = field(default_factory=lambda: _series())
     auto_discover: bool = _bool("AUTO_DISCOVER", "false")
     discover_categories: list = field(default_factory=lambda: _list("DISCOVER_CATEGORIES", "Crypto,Commodities"))
     discover_every_min: int = int(_env("DISCOVER_EVERY_MIN", "30"))
@@ -117,11 +125,18 @@ ASSETS = {
     # GOLD uses live PAXG (gold-backed token, 24/7) with an automatic correction to Kalshi's gold price
     "GOLD":   {"patterns": [r"\bgold\b", r"\bkxgold"],                             "feed": "paxg",     "symbol": "PAXG-USD",
                "basis_correct": True},
-    "WTI":    {"patterns": [r"\bwti\b", r"\bkxwti", r"\bcrude\b"],                 "feed": "yahoo",    "symbol": "CL=F"},
-    "NATGAS": {"patterns": [r"\bnatural gas\b", r"\bkxnatgas", r"\bhenry hub\b"], "feed": "yahoo",    "symbol": "NG=F"},
+    # SILVER / OIL / NAT GAS use live CME futures from your Schwab account (connect on the dashboard),
+    # with the same automatic correction to Kalshi's price and the same accuracy gate as gold.
+    "SILVER": {"patterns": [r"\bsilver\b", r"\bkxsilver"],                         "feed": "schwab",   "symbol": "/SI",
+               "basis_correct": True, "max_err_pct": 0.05},
+    "WTI":    {"patterns": [r"\bwti\b", r"\bkxwti", r"\bcrude\b"],                 "feed": "schwab",   "symbol": "/CL",
+               "basis_correct": True, "max_err_pct": 0.05},
+    "NATGAS": {"patterns": [r"\bnatural gas\b", r"\bkxnatgas", r"\bhenry hub\b"], "feed": "schwab",   "symbol": "/NG",
+               "basis_correct": True, "max_err_pct": 0.10},
 }
-ASSET_ORDER = ["BTC", "GOLD", "WTI", "NATGAS"]
-ASSET_LABEL = {"BTC": "BTC", "GOLD": "GOLD", "WTI": "OIL (WTI)", "NATGAS": "NAT GAS"}
+ASSET_ORDER = ["BTC", "GOLD", "SILVER", "WTI", "NATGAS"]
+ASSET_LABEL = {"BTC": "BTC", "GOLD": "GOLD", "SILVER": "SILVER", "WTI": "OIL (WTI)", "NATGAS": "NAT GAS"}
+ACCURACY_ASSETS = [a for a in ASSET_ORDER if a == "BTC" or ASSETS[a].get("basis_correct")]
 
 EXCLUDE_PATTERNS = [r"\bethereum\b", r"\bkxeth", r"\bsolana\b", r"\bxrp\b", r"\bdoge", r"\bbrent\b",
                     r"\bgasoline\b", r"\bgas prices?\b", r"\bdominance\b"]

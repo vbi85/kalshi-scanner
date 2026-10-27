@@ -12,13 +12,15 @@ from zoneinfo import ZoneInfo
 from flask import Flask, Response, jsonify, redirect, request, send_from_directory, session
 from werkzeug.middleware.proxy_fix import ProxyFix
 
-from scanner import db
+from urllib.parse import quote_plus
+
+from scanner import db, schwab
 from scanner.config import ASSET_LABEL, EDITABLE, Config
 
 cfg = Config()
 TZ = ZoneInfo(os.getenv("TZ_NAME", "America/Chicago"))
 app = Flask(__name__, static_folder="static", static_url_path="/static")
-app.json.sort_keys = False      # keep market order BTC, Gold, Oil, Nat Gas
+app.json.sort_keys = False      # keep market order BTC, Gold, Silver, Oil, Nat Gas
 app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)   # behind Caddy (HTTPS)
 conn = db.connect(cfg.db_path)
 
@@ -146,6 +148,10 @@ def state():
                     "connected_at": k.get("connected_at"), "balance": k.get("balance")}
                    if k else {"connected": bool(cfg.api_key_id and cfg.private_key_path), "key_hint": "from .env"
                               if cfg.api_key_id else None, "demo": cfg.demo})
+    sw = schwab.status(cfg.key_dir)
+    eng = s.get("schwab") or {}
+    sw.update(feed=eng.get("feed"), error=eng.get("error"), callback=f"{request.host_url.rstrip('/')}/schwab/callback")
+    s["schwab"] = sw
     return jsonify(s)
 
 
@@ -220,6 +226,49 @@ def delete_key():
         os.remove(path)
     db.put(conn, "kalshi_key", None)
     db.put(conn, "trading_mode", "paper")      # no key = no live trading
+    return jsonify(ok=True)
+
+
+# ---------------- Schwab (live futures prices for Silver / Oil / Nat Gas) ----------------
+def _schwab_redirect():
+    return f"{request.host_url.rstrip('/')}/schwab/callback"
+
+
+@app.post("/api/schwab-app")
+@auth
+def schwab_save_app():
+    body = request.get_json(silent=True) or {}
+    key, secret = (body.get("key") or "").strip(), (body.get("secret") or "").strip()
+    if len(key) < 16 or len(secret) < 8:
+        return jsonify(ok=False, error="Paste the App Key and Secret from developer.schwab.com → Apps"), 400
+    schwab.save_app(cfg.key_dir, key, secret, _schwab_redirect())
+    return jsonify(ok=True, login_url=schwab.auth_url(cfg.key_dir), callback=_schwab_redirect())
+
+
+@app.get("/api/schwab-login")
+@auth
+def schwab_login():
+    url = schwab.auth_url(cfg.key_dir)
+    return redirect(url) if url else redirect("/#schwab")
+
+
+@app.get("/schwab/callback")
+@auth
+def schwab_callback():
+    code = request.args.get("code")
+    if not code:
+        return redirect("/?schwab=" + quote_plus(request.args.get("error") or "no code from Schwab"))
+    try:
+        schwab.exchange_code(cfg.key_dir, code)
+    except Exception as e:
+        return redirect("/?schwab=" + quote_plus(f"login failed: {str(e)[:150]}"))
+    return redirect("/?schwab=connected")
+
+
+@app.delete("/api/schwab")
+@auth
+def schwab_delete():
+    schwab.disconnect(cfg.key_dir)
     return jsonify(ok=True)
 
 

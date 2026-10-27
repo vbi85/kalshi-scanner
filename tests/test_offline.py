@@ -662,3 +662,103 @@ def test_sheet_daily_pnl_midnight_to_midnight(cfg):
     assert rows[2][-2] == "Sat Oct 24" and rows[2][-1] == "-0.04"     # Saturday: +0.48 - 0.52
     daily = c.get("/" + path.replace(".csv", "/daily.csv")).data.decode().strip().splitlines()
     assert daily[0].startswith("Day,Trades,Wins,Win %,P&L") and daily[1].startswith("Sun Oct 25,2,2,100")
+
+
+# ---------------- Schwab live futures (Silver / Oil / Nat Gas) ----------------
+class FakeResp:
+    def __init__(self, data, code=200):
+        self._d, self.status_code, self.text = data, code, str(data)
+
+    def json(self):
+        return self._d
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise RuntimeError(self.status_code)
+
+
+class FakeSchwab:
+    def __init__(self):
+        self.posts, self.n = [], 0
+        self.px = {"/SI": 54.0, "/CL": 61.5, "/NG": 3.105}
+
+    def post(self, url, data=None, headers=None, timeout=None):
+        self.posts.append(data)
+        self.n += 1
+        return FakeResp({"access_token": f"A{self.n}", "refresh_token": "R1", "expires_in": 1800})
+
+    def get(self, url, params=None, headers=None, timeout=None):
+        assert headers["Authorization"].startswith("Bearer A")
+        now = int(time.time() * 1000)
+        return FakeResp({s: {"realtime": True, "quote": {"bidPrice": p - 0.005, "askPrice": p + 0.005,
+                                                         "lastPrice": p, "quoteTime": now}}
+                         for s, p in self.px.items() if s in params["symbols"].split(",")})
+
+
+def test_silver_classified_and_always_watched():
+    assert classify_asset("KXSILVER15M Silver 15 min") == "SILVER"
+    os.environ["SERIES"] = "KXBTC15M,KXGOLD15M"            # an older .env list
+    try:
+        assert "KXSILVER15M" in Config().series
+    finally:
+        del os.environ["SERIES"]
+
+
+def test_schwab_login_refresh_and_quotes(tmp_path):
+    from scanner import schwab
+    kd, fs = str(tmp_path), FakeSchwab()
+    assert schwab.status(kd) == {"app": False, "connected": False, "days_left": None}
+    schwab.save_app(kd, "K" * 32, "S" * 16, "https://x.sslip.io/schwab/callback")
+    assert "client_id=" + "K" * 32 in schwab.auth_url(kd)
+    st = schwab.exchange_code(kd, "CODE@", fs)
+    assert st["connected"] and 6.9 < st["days_left"] <= 7
+    assert oct(os.stat(os.path.join(kd, "schwab_tokens.json")).st_mode)[-3:] == "600"
+    assert schwab.access_token(kd, fs) == "A1" and fs.n == 1               # still fresh: no refresh
+    tok = schwab._read(os.path.join(kd, "schwab_tokens.json"))
+    tok["access_exp"] = time.time() - 1
+    schwab._write(os.path.join(kd, "schwab_tokens.json"), tok)
+    assert schwab.access_token(kd, fs) == "A2" and fs.posts[-1]["grant_type"] == "refresh_token"
+    q = schwab.quotes(kd, ["/SI", "/NG"], fs)
+    assert q["/SI"]["price"] == pytest.approx(54.0) and q["/NG"]["realtime"]
+    tok = schwab._read(os.path.join(kd, "schwab_tokens.json"))
+    tok["refresh_exp"] = time.time() - 1                                    # 7 days passed
+    schwab._write(os.path.join(kd, "schwab_tokens.json"), tok)
+    assert schwab.quotes(kd, ["/SI"], fs) is None and not schwab.status(kd)["connected"]
+
+
+def test_schwab_feed_builds_history_and_blocks_until_ready(tmp_path, cfg):
+    from scanner import prices, schwab
+    kd, fs = str(tmp_path), FakeSchwab()
+    schwab.save_app(kd, "K" * 32, "S" * 16, "https://x/schwab/callback")
+    schwab.exchange_code(kd, "C", fs)
+    feed = prices.SchwabFeed(key_dir=kd, start=False, session=fs)
+    prices._comps.pop("SILVER", None)
+    store = feed.register("SILVER", "/SI")
+    assert feed.poll_once() and feed.status == "live"
+    now = time.time()
+    for k in range(20, 0, -1):                       # 20 minutes of history, gently rising
+        store.add(now - k * 60, 53.5 + 0.02 * (20 - k))
+    old = prices._schwab
+    prices._schwab = feed
+    try:
+        px = prices.schwab("/SI", 15)
+    finally:
+        prices._schwab = old
+    assert px["source"] == "Schwab /SI" and px["sigma_1m"] and px["age_sec"] < 5 and len(px["closes"]) >= 15
+    store.realtime = False                           # Schwab says delayed -> never tradeable
+    prices._schwab = feed
+    try:
+        assert prices.schwab("/SI", 15)["age_sec"] >= 600
+    finally:
+        prices._schwab = old
+        prices._comps.pop("SILVER", None)
+
+
+def test_futures_card_says_connect_schwab(cfg, tmp_path):
+    import dataclasses
+    c2 = dataclasses.replace(cfg, key_dir=str(tmp_path))
+    e = Engine(c2, public=FakePublic(), price_fn=lambda *a: None, conn=db.connect(":memory:"))
+    m = {"ticker": "KXSILVER15M-X", "close_time": iso(5), "floor_strike": 54.0, "strike_type": "greater",
+         "yes_ask_dollars": "0.50", "no_ask_dollars": "0.52", "yes_ask_size_fp": "50", "no_ask_size_fp": "50"}
+    r = e.evaluate(m, "KXSILVER15M", {"asset": "SILVER"}, None)
+    assert r["status"] == "BLOCKED" and "Connect Schwab" in r["note"]

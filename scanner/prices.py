@@ -230,7 +230,110 @@ def paxg(symbol, lookback_min, session=None):
     return _composite_feed("GOLD", "PAXG-USD", "PAXG", lookback_min, session)
 
 
-FEEDS = {"coinbase": coinbase, "yahoo": yahoo, "brti": brti, "paxg": paxg}
+# ---------------------------------------------------------------------------
+# Schwab: live CME futures (Oil /CL, Nat Gas /NG, Silver /SI). One background thread asks
+# Schwab for all symbols every 2 seconds and keeps our own history (same averaging and
+# accuracy checks as BTC/Gold). History needs ~11 minutes after a restart before trading.
+# ---------------------------------------------------------------------------
+import os
+
+from . import schwab as schwab_api
+
+
+class Store(Composite):
+    """Price history filled from outside (no exchange polling of its own)."""
+
+    def __init__(self, name="store"):
+        self.sources = {name: None}
+        self.samples = deque(maxlen=int(3 * 3600 / 2))
+        self.last_sources = {}
+        self.lock = threading.Lock()
+        self.quote_ts = 0.0
+        self.realtime = None
+
+
+class SchwabFeed:
+    def __init__(self, key_dir=None, interval=2.0, start=True, session=None):
+        self.key_dir = key_dir or os.getenv("KEY_DIR", "keys")
+        self.interval = interval
+        self.s = session or requests.Session()
+        self.symbols = {}                 # "/CL" -> asset
+        self.status = "not connected"
+        self.last_error = None
+        self._err_ts = 0
+        if start:
+            threading.Thread(target=self._loop, daemon=True, name="schwab-feed").start()
+
+    def register(self, asset, symbol):
+        if asset not in _comps:
+            _comps[asset] = Store(name="Schwab")
+        self.symbols[symbol.upper()] = asset
+        return _comps[asset]
+
+    def poll_once(self):
+        if not self.symbols:
+            return
+        got = schwab_api.quotes(self.key_dir, list(self.symbols), self.s)
+        if got is None:
+            self.status = "not connected"
+            return False
+        now = time.time()
+        for sym, q in got.items():
+            asset = self.symbols.get(sym)
+            st = _comps.get(asset)
+            if not st:
+                continue
+            spread = (q["ask"] - q["bid"]) if q.get("ask") and q.get("bid") else 0.0
+            st.add(now, q["price"], 1, spread)
+            st.quote_ts, st.realtime = q["ts"], q["realtime"]
+        self.status = "live" if got else "no quotes"
+        return True
+
+    def _loop(self):
+        while True:
+            t0 = time.time()
+            ok = None
+            try:
+                ok = self.poll_once()
+                self.last_error = None
+            except Exception as e:
+                self.status, self.last_error = "error", str(e)[:200]
+                if time.time() - self._err_ts > 300:
+                    print(f"[prices] schwab error: {e}")
+                    self._err_ts = time.time()
+            wait = self.interval if ok else 10
+            time.sleep(max(0.2, wait - (time.time() - t0)))
+
+
+_schwab = None
+
+
+def schwab_feed(start=True):
+    global _schwab
+    if _schwab is None and start:
+        _schwab = SchwabFeed()
+    return _schwab
+
+
+def schwab(symbol, lookback_min, session=None):
+    from .config import ASSETS
+    asset = next((a for a, s in ASSETS.items() if s.get("symbol", "").upper() == symbol.upper()), symbol)
+    store = schwab_feed().register(asset, symbol)
+    last = store.latest()
+    if not last:
+        return None
+    ts, px, _, spread = last
+    closes = store.minute_closes(lookback_min)
+    closes = closes[:-1] + [px] if closes else [px]
+    avg60, _ = store.avg(time.time(), 60)
+    age = time.time() - (store.quote_ts or ts)
+    if store.realtime is False:
+        age = max(age, 600)               # Schwab says delayed: never trade on it
+    return {"price": px, "age_sec": age, "sigma_1m": _sigma(closes), "closes": closes, "spread": spread,
+            "avg60": avg60, "source": f"Schwab {symbol.upper()}"}
+
+
+FEEDS = {"coinbase": coinbase, "yahoo": yahoo, "brti": brti, "paxg": paxg, "schwab": schwab}
 
 
 def get_price(feed, symbol, lookback_min, session=None):

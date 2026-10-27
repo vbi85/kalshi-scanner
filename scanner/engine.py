@@ -1,6 +1,6 @@
 """Main loop for the 15-minute UP/DOWN bot.
 
-Every cycle, for each market (BTC, Gold, Oil):
+Every cycle, for each market (BTC, Gold, Silver, Oil, Nat Gas):
   1. Read the current 15-minute window: target price, time left, Kalshi prices.
   2. Measure momentum over the last 5 minutes -> predict UP or DOWN.
   3. Price the odds of that direction winning (momentum-adjusted).
@@ -17,9 +17,9 @@ import traceback
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
-from . import db, gates, prices, variants
+from . import db, gates, prices, schwab, variants
 from .alerts import Alerter
-from .config import ASSET_LABEL, ASSET_ORDER, ASSETS, EDITABLE, SEED_SETTINGS, Config
+from .config import ACCURACY_ASSETS, ASSET_LABEL, ASSET_ORDER, ASSETS, EDITABLE, SEED_SETTINGS, Config
 from .kalshi import KalshiPublic, KalshiTrader, parse_time, quote
 from .model import edges, fair_yes, momentum, taker_fee, up_side
 from .prices import get_price
@@ -274,8 +274,13 @@ class Engine:
             return blocked("not an up/down market")
         if target is None:
             return blocked("target price not set yet")
-        if not px or not px.get("sigma_1m"):
+        if not px and ASSETS.get(info["asset"], {}).get("feed") == "schwab" \
+                and not schwab.status(self.cfg.key_dir)["connected"]:
+            return blocked("needs live futures price — tap Connect Schwab below")
+        if not px:
             return blocked("price feed down")
+        if not px.get("sigma_1m"):
+            return blocked("building price history (about 11 min after a restart)")
         if px["age_sec"] > cfg.max_price_age_sec:
             return blocked(f"price {px['age_sec'] / 60:.0f} min delayed — unsafe")
         mom = momentum(px["price"], px.get("closes"), px["sigma_1m"], cfg.mom_lookback_min)
@@ -411,8 +416,9 @@ class Engine:
 
     def update_gates(self):
         for asset in [a for a in ASSET_ORDER if a in {v["asset"] for v in self.series.values()} | {"BTC"}]:
-            acc = self.accuracy_stats(asset) if asset in ("BTC", "GOLD") else None
-            limit = self.cfg.gate_max_price_err_pct_gold if asset == "GOLD" else self.cfg.gate_max_price_err_pct
+            acc = self.accuracy_stats(asset) if asset in ACCURACY_ASSETS else None
+            limit = ASSETS[asset].get("max_err_pct") or (
+                self.cfg.gate_max_price_err_pct_gold if asset == "GOLD" else self.cfg.gate_max_price_err_pct)
             passed, checks, s = gates.evaluate(db.settled(self.c, "paper", asset), self.cfg, accuracy=acc,
                                                max_err_pct=limit)
             was = self.gate_status.get(asset, {}).get("passed")
@@ -459,7 +465,8 @@ class Engine:
                             "spread": p.get("spread"), "source": p.get("source")} if p else None)
                        for a, p in prices.items()},
             "errors": self.errors,
-            "accuracy": {a: self.accuracy_stats(a) for a in ("BTC", "GOLD")},
+            "accuracy": {a: self.accuracy_stats(a) for a in ACCURACY_ASSETS},
+            "schwab": self.schwab_status(),
             "rules": {ASSETS_BY_SERIES.get(k, k): v[:300] for k, v in self.rules.items()},
             "variants": variants.stats([r for r in db.shadow_all(self.c)
                                         if r["ts"] >= (db.get(self.c, "variant_since") or 0)]),
@@ -470,6 +477,19 @@ class Engine:
                          **{k: getattr(self.cfg, k) for k in EDITABLE},
                          "max_dollars": self.cfg.max_dollars_per_trade, "max_daily_loss": self.cfg.max_daily_loss},
         })
+
+    def schwab_status(self):
+        st = schwab.status(self.cfg.key_dir)
+        feed = prices.schwab_feed(start=False)
+        st["feed"] = feed.status if feed else "idle"
+        st["error"] = feed.last_error if feed else None
+        # text a reminder once per login when under 1 day is left
+        if st["connected"] and st["days_left"] is not None and st["days_left"] < 1:
+            if db.get(self.c, "schwab_warned") != st.get("login_ts"):
+                db.put(self.c, "schwab_warned", st.get("login_ts"))
+                self.alerts.send("Schwab login expires within 24 hours. Open the bot dashboard and tap "
+                                 "'Log in to Schwab' to keep Silver/Oil/Gas prices live.", force=True)
+        return st
 
     def sampler(self, asset):
         return self._comp_override.get(asset) or prices.composite(asset, start=False)

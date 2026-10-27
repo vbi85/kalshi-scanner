@@ -190,6 +190,16 @@
       </div>
       <div class="sub" id="kSub">Paper trading works without it. Needed only for LIVE.</div>
     </div>
+    <div class="card ctl" id="schwab" style="grid-column:1/-1">
+      <div class="l">Schwab live prices (Silver · Oil · Nat Gas)</div>
+      <div class="conn">
+        <span class="dot" id="sDot"></span>
+        <span class="big" id="sText">Not connected</span>
+        <span class="spacer" style="flex:1"></span>
+        <button class="btn2" id="sBtn" onclick="schwabAction()">Connect</button>
+      </div>
+      <div class="sub" id="sSub">Free real-time futures prices from your Schwab account. Read-only — the bot never trades at Schwab.</div>
+    </div>
   </div>
 
   <div class="grid markets" id="cards"></div>
@@ -220,6 +230,30 @@
       <div class="row">
         <button class="btn2" onclick="closeSheet('setSheet')">Cancel</button>
         <button class="btn2 btn-green" onclick="saveSettings()">Save</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Connect Schwab -->
+  <div class="sheet-bg" id="schwabSheet" onclick="if(event.target===this)closeSheet('schwabSheet')">
+    <div class="sheet">
+      <h3>Connect Schwab (live prices)</h3>
+      <p>Read-only market data. Saved only on your own server. Never shown again.</p>
+      <ol>
+        <li>On <b>developer.schwab.com</b> → <b>Dashboard → Apps</b>, open your app (status must say <b>Ready For Use</b>).</li>
+        <li>Its Callback URL must be exactly:<br><b id="sCb" style="word-break:break-all;color:var(--text)"></b></li>
+        <li>Copy the <b>App Key</b> and <b>Secret</b> into the boxes, then tap <b>Save &amp; log in</b>. Schwab asks you to sign in and tick your account — then it sends you back here.</li>
+      </ol>
+      <input type="text" id="sKey" placeholder="App Key" autocomplete="off" autocapitalize="none" spellcheck="false">
+      <input type="text" id="sSecret" placeholder="Secret" autocomplete="off" autocapitalize="none" spellcheck="false">
+      <div class="err" id="sErr"></div>
+      <div class="row">
+        <button class="btn2" onclick="closeSheet('schwabSheet')">Cancel</button>
+        <button class="btn2 btn-green" id="sSave" onclick="saveSchwab()">Save &amp; log in</button>
+      </div>
+      <div id="sDisc" style="display:none;margin-top:16px;text-align:center">
+        <button class="btn2" onclick="location.href='/api/schwab-login'">Log in to Schwab again</button>
+        <button class="btn2" style="color:var(--red);margin-top:8px" onclick="disconnectSchwab()">Disconnect Schwab</button>
       </div>
     </div>
   </div>
@@ -308,7 +342,7 @@ let killed=false, cards=[], skew=0, cfg={entry_start:7.5, entry_end:2};
 
 function cardHTML(c){
   const sid = (c.status||'').replace(/ /g,'-');
-  const decimals = c.asset==='BTC'?2:2;
+  const decimals = c.asset==='NATGAS'?3:2;
   let clock = '<div class="clock late">—</div><div class="clocklbl">'+esc(c.note)+'</div>';
   let tl = '';
   if (c.close_ts){
@@ -341,16 +375,20 @@ function cardHTML(c){
     ${clock}${tl}
     <div class="row2">
       <div class="stat"><div class="l">Target</div><div class="v">${num(c.target,decimals)}</div></div>
-      <div class="stat"><div class="l">Now${({BTC:' · BRTI est.',GOLD:' · PAXG'})[c.asset]||''}</div><div class="v">${num(c.spot,decimals)}
+      <div class="stat"><div class="l">Now${({BTC:' · BRTI est.',GOLD:' · PAXG',SILVER:' · Schwab /SI',WTI:' · Schwab /CL',NATGAS:' · Schwab /NG'})[c.asset]||''}</div><div class="v">${num(c.spot,decimals)}
         ${diff!=null?`<span class="${cls(diff)}" style="font-size:13px"> ${diff>0?'+':''}${diffPct.toFixed(3)}%</span>`:''}</div></div>
     </div>${accLine(c)}${kalshiPx(c)}${pred}${action}${note}</div>`;
 }
 function accLine(c){
-  if (!['BTC','GOLD'].includes(c.asset)) return rulesLine(c);
+  const LIM = {BTC:0.02, GOLD:0.05, SILVER:0.05, WTI:0.05, NATGAS:0.10};
+  if (!(c.asset in LIM)) return rulesLine(c);
   const p = ((lastState.prices||{})[c.asset])||{}, a = ((lastState.accuracy||{})[c.asset])||{};
-  const lim = c.asset==='GOLD' ? 0.05 : 0.02;
-  const src = p.sources ? `${p.sources}/${p.max_sources||p.sources} exchanges` : 'starting…';
-  const gap = (c.asset==='GOLD' && a.n>=3) ? ` · PAXG→Kalshi gap ${a.gap>=0?'+':''}$${a.gap.toFixed(2)} (auto-corrected)` : '';
+  const lim = LIM[c.asset], futures = ['SILVER','WTI','NATGAS'].includes(c.asset);
+  if (futures && !p.price) return rulesLine(c);
+  const src = futures ? (p.price ? `Schwab live · ${p.age_sec}s old` : 'starting…')
+                      : (p.sources ? `${p.sources}/${p.max_sources||p.sources} exchanges` : 'starting…');
+  const gname = c.asset==='GOLD' ? 'PAXG→Kalshi gap' : 'futures→Kalshi gap';
+  const gap = (c.asset!=='BTC' && a.n>=3) ? ` · ${gname} ${a.gap>=0?'+':''}$${a.gap.toFixed(c.asset==='NATGAS'?3:2)} (auto-corrected)` : '';
   const acc = a.n ? `vs Kalshi target: <b class="${a.mae_pct<=lim?'pos':'neg'}">±$${a.mae.toFixed(2)}</b> avg over ${a.n} window${a.n>1?'s':''}`
                   : 'vs Kalshi target: measuring (first check within 15 min)';
   return `<div class="muted" style="font-size:13px;margin-top:8px">${src} · ${acc}${gap}</div>` + rulesLine(c);
@@ -422,6 +460,16 @@ async function load(){
     ? `Key ${esc(K.key_hint||'')} · balance ${s.balance!=null?money(s.balance):(K.balance!=null?money(K.balance):'—')}${K.demo?' (fake money)':''}`
     : 'Paper trading works without it. Needed only for LIVE.';
   $('kDisc').style.display = K.connected && K.key_hint!=='from .env' ? 'block' : 'none';
+  const S = s.schwab||{};
+  const sWarn = S.connected && S.days_left < 1.5;
+  $('sDot').className = 'dot' + (S.connected ? (sWarn?' demo':' ok') : '');
+  $('sText').textContent = S.connected ? (S.feed==='live' ? 'Connected — live' : 'Connected') : (S.app ? 'Login needed' : 'Not connected');
+  $('sBtn').textContent = S.connected ? 'Manage' : (S.app ? 'Log in' : 'Connect');
+  $('sSub').innerHTML = S.connected
+    ? `Re-login due in <b class="${sWarn?'neg':''}">${S.days_left} days</b> (Schwab rule: every 7 days)${S.error?` · <span class="neg">${esc(S.error.slice(0,90))}</span>`:''}`
+    : (S.app ? 'Your app is saved. Tap <b>Log in</b> to sign in at Schwab.' : 'Free real-time futures prices from your Schwab account. Read-only — the bot never trades at Schwab.');
+  $('sCb').textContent = S.callback || '';
+  $('sDisc').style.display = S.app ? 'block' : 'none';
   const m = $('mode');
   if (killed){ m.className='badge b-kill'; m.textContent='STOPPED'; }
   else if (anyLive){ m.className='badge b-live'; m.textContent= K.demo?'LIVE (DEMO)':'LIVE'; }
@@ -549,6 +597,31 @@ async function disconnectKey(){
   if (!confirm('Disconnect Kalshi? The key is deleted from your server and the bot goes back to PAPER.')) return;
   await post('/api/kalshi-key', null, 'DELETE'); closeSheet('keySheet'); load();
 }
+
+function schwabAction(){
+  const S = lastState.schwab||{};
+  if (S.app && !S.connected){ location.href='/api/schwab-login'; return; }
+  $('sErr').textContent=''; openSheet('schwabSheet');
+}
+async function saveSchwab(){
+  $('sErr').textContent=''; $('sSave').disabled=true;
+  try{
+    const r = await post('/api/schwab-app', {key:$('sKey').value, secret:$('sSecret').value});
+    if (!r.ok){ $('sErr').textContent = r.error; return; }
+    $('sKey').value=''; $('sSecret').value='';
+    location.href = r.login_url;
+  } finally { $('sSave').disabled=false; }
+}
+async function disconnectSchwab(){
+  if (!confirm('Disconnect Schwab? Silver, Oil and Nat Gas stop trading (paper) until you reconnect.')) return;
+  await post('/api/schwab', null, 'DELETE'); closeSheet('schwabSheet'); load();
+}
+(function(){            // message after returning from Schwab's login page
+  const m = new URLSearchParams(location.search).get('schwab');
+  if (!m) return;
+  history.replaceState(null, '', '/');
+  setTimeout(()=>alert(m==='connected' ? 'Schwab connected. Live prices start within a minute; trading on Silver/Oil/Gas begins after ~11 minutes of price history.' : 'Schwab: ' + m), 300);
+})();
 
 async function copySheetLink(rotate){
   const res = await fetch('/api/sheet-link' + (rotate?'?new=1':''));
