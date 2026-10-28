@@ -120,22 +120,42 @@ def access_token(key_dir, session=None):
         return tok["access"]
 
 
+def _root(sym):
+    """'/SIZ26' -> '/SI' (futures root); plain symbols unchanged."""
+    sym = (sym or "").upper()
+    if sym.startswith("/") and len(sym) > 3 and sym[-2:].isdigit() and sym[-3].isalpha():
+        return sym[:-3]
+    return sym
+
+
 def quotes(key_dir, symbols, session=None):
-    """{symbol: {"price", "bid", "ask", "ts", "realtime"}} for futures like /CL, /NG, /SI."""
+    """{requested symbol: {"price", "bid", "ask", "ts", "realtime"}} for futures like /CL, /NG, /SI.
+    Schwab may answer under the root (/SI) or the exact contract (/SIZ26); both map back to /SI."""
     tok = access_token(key_dir, session)
     if not tok:
         return None
     s = session or requests
     r = s.get(f"{API}/marketdata/v1/quotes", params={"symbols": ",".join(symbols), "fields": "quote"},
               headers={"Authorization": f"Bearer {tok}"}, timeout=5)
-    r.raise_for_status()
+    if r.status_code != 200:
+        raise RuntimeError(f"Schwab quotes {r.status_code}: {r.text[:160]}")
+    data = r.json() or {}
+    wanted = {x.upper(): x.upper() for x in symbols}
     out = {}
-    for sym, d in (r.json() or {}).items():
-        q = d.get("quote") or {}
-        bid, ask, last = q.get("bidPrice"), q.get("askPrice"), q.get("lastPrice")
+    for key, d in data.items():
+        if not isinstance(d, dict) or "quote" not in d and "lastPrice" not in d:
+            continue
+        q = d.get("quote") or d
+        bid, ask, last = q.get("bidPrice"), q.get("askPrice"), q.get("lastPrice") or q.get("mark")
         mid = (bid + ask) / 2 if bid and ask and ask >= bid else last
         ts = (q.get("quoteTime") or q.get("tradeTime") or 0) / 1000
-        if mid:
-            out[sym.upper()] = {"price": float(mid), "bid": bid, "ask": ask, "ts": ts or time.time(),
-                                "realtime": d.get("realtime", True)}
+        req = next((wanted[c] for c in (key.upper(), _root(key), _root(d.get("symbol")),
+                                         (d.get("symbol") or "").upper()) if c in wanted), None)
+        if mid and req:
+            out[req] = {"price": float(mid), "bid": bid, "ask": ask, "ts": ts or time.time(),
+                        "realtime": d.get("realtime", True), "contract": d.get("symbol") or key}
+    missing = [x for x in wanted if x not in out]
+    if missing and not out:
+        bad = (data.get("errors") or {}) if isinstance(data.get("errors"), dict) else {}
+        raise RuntimeError(f"no prices for {','.join(missing)}; Schwab sent keys={list(data)[:5]} {str(bad)[:80]}")
     return out

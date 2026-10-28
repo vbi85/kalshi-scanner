@@ -280,7 +280,10 @@ class Engine:
                 and not schwab.status(self.cfg.key_dir)["connected"]:
             return blocked("needs live futures price — tap Connect Schwab below")
         if not px:
-            return blocked("price feed down")
+            feed = prices.schwab_feed(start=False) if ASSETS.get(info["asset"], {}).get("feed") == "schwab" else None
+            if feed and feed.last_error:
+                return blocked(f"Schwab price problem: {feed.last_error[:140]}")
+            return blocked("price feed down" + (f" (Schwab: {feed.status})" if feed else ""))
         if not px.get("sigma_1m"):
             return blocked("building price history (about 11 min after a restart)")
         if px["age_sec"] > cfg.max_price_age_sec:

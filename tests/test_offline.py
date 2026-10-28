@@ -785,3 +785,22 @@ def test_gold_gap_follows_a_moving_gap(cfg):
     assert e.basis_offset("GOLD") == -1.0                         # caught up after 6 windows
     acc = e.accuracy_stats("GOLD")
     assert acc["gap"] == -1.0 and acc["worst"] == 6.0             # the jump is counted as real error
+
+
+def test_schwab_contract_keys_map_back_to_root(tmp_path):
+    from scanner import schwab
+    kd, fs = str(tmp_path), FakeSchwab()
+    schwab.save_app(kd, "K" * 32, "S" * 16, "https://x/schwab/callback")
+    schwab.exchange_code(kd, "C", fs)
+    real_get = fs.get
+
+    def get(url, params=None, headers=None, timeout=None):     # Schwab answers with exact contracts
+        r = real_get(url, params, headers, timeout)
+        r._d = {k + "Z26": dict(v, symbol=k + "Z26") for k, v in r._d.items()}
+        return r
+    fs.get = get
+    q = schwab.quotes(kd, ["/SI", "/CL"], fs)
+    assert set(q) == {"/SI", "/CL"} and q["/SI"]["contract"] == "/SIZ26"
+    fs.get = lambda *a, **k: FakeResp({"errors": {"invalidSymbols": ["/SI"]}})
+    with pytest.raises(RuntimeError, match="no prices for /SI"):
+        schwab.quotes(kd, ["/SI"], fs)
