@@ -17,14 +17,17 @@ VARIANTS = [
     {"id": "D", "name": "Calmer odds",   "what": "Current + volatility ×1.5, momentum weight 0.15",
      "over": {"vol_mult": 1.5, "mom_weight": 0.15}},
     {"id": "E", "name": "No big spikes", "what": "Current + skip momentum above 2.0", "over": {"mom_max_z": 2.0}},
+    # added Oct 27 (counts start then): a 20c+ "edge" usually means our price is off, not a real bargain
+    {"id": "F", "name": "Skip huge edges", "what": "Current + skip edges above 20¢ (too good to be true)",
+     "over": {"max_edge": 0.20}},
 ]
 
 KEYS = ("min_edge", "max_price", "min_price", "vol_mult", "mom_weight", "mom_min_z", "mom_max_z",
-        "min_ask_size", "slippage")
+        "min_ask_size", "slippage", "max_edge")
 
 
 def params(cfg, variant):
-    p = {k: getattr(cfg, k) for k in KEYS}
+    p = {k: getattr(cfg, k, None) for k in KEYS}
     p.update(variant["over"])
     return p
 
@@ -46,6 +49,8 @@ def decide(p, m, q, px, mom, mins, mins_eff, usd, fee_mult):
     if e is None or not price or not (p["min_price"] <= price <= p["max_price"]):
         return None
     if size < p["min_ask_size"] or e < p["min_edge"]:
+        return None
+    if p.get("max_edge") and e > p["max_edge"]:
         return None
     fill = round(min(0.99, price + p["slippage"]), 4)          # same paper fill rule as the main bot
     return {"side": side, "price": fill, "fee": taker_fee(fill, 1, fee_mult), "fair": round(fair, 4),

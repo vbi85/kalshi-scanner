@@ -762,3 +762,26 @@ def test_futures_card_says_connect_schwab(cfg, tmp_path):
          "yes_ask_dollars": "0.50", "no_ask_dollars": "0.52", "yes_ask_size_fp": "50", "no_ask_size_fp": "50"}
     r = e.evaluate(m, "KXSILVER15M", {"asset": "SILVER"}, None)
     assert r["status"] == "BLOCKED" and "Connect Schwab" in r["note"]
+
+
+def test_variant_f_skips_too_good_to_be_true():
+    from scanner import variants
+    c = Config()
+    m = {"strike_type": "greater_or_equal", "floor_strike": 100_000}
+    q = {"yes_ask": 0.40, "yes_ask_size": 50, "no_ask": 0.62, "no_ask_size": 50}
+    px = {"price": 100_150.0, "sigma_1m": 0.0008}                 # far above target -> huge "edge"
+    mom = {"dir": "UP", "z": 1.0, "r1": 0.0001, "drift_1m": 0.0001}
+    p = lambda vid: variants.params(c, next(v for v in variants.VARIANTS if v["id"] == vid))
+    a = variants.decide(p("A"), m, q, px, mom, 6, 5.33, "yes", 1.0)
+    f = variants.decide(p("F"), m, q, px, mom, 6, 5.33, "yes", 1.0)
+    assert a and a["edge"] > 0.20 and f is None
+
+
+def test_gold_gap_follows_a_moving_gap(cfg):
+    e, _ = _gold_engine(cfg, gap=0.0, windows=0)
+    hist = [{"ts": i, "ticker": f"T{i}", "ours": 0, "kalshi": 4100.0, "diff": d, "pct": 0, "n": 30}
+            for i, d in enumerate([-5.0] * 10 + [1.0] * 6)]       # gap jumps from $5 to -$1
+    db.put(e.c, "gold_accuracy", hist)
+    assert e.basis_offset("GOLD") == -1.0                         # caught up after 6 windows
+    acc = e.accuracy_stats("GOLD")
+    assert acc["gap"] == -1.0 and acc["worst"] == 6.0             # the jump is counted as real error

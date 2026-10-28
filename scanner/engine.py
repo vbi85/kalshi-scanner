@@ -226,11 +226,13 @@ class Engine:
             out[asset] = px
         return out
 
-    def basis_offset(self, asset, last=20, min_checks=3):
+    GAP_WINDOWS = 6     # gap correction follows the last 6 windows (~90 min) so it keeps up when the gap moves
+
+    def basis_offset(self, asset, last=None, min_checks=3):
         """Typical gap between Kalshi's target and our price, learned every window (median, robust)."""
         if not ASSETS.get(asset, {}).get("basis_correct"):
             return 0.0
-        hist = (db.get(self.c, f"{asset.lower()}_accuracy") or [])[-last:]
+        hist = (db.get(self.c, f"{asset.lower()}_accuracy") or [])[-(last or self.GAP_WINDOWS):]
         if len(hist) < min_checks:
             return 0.0
         return round(-statistics.median(h["diff"] for h in hist), 2)
@@ -521,10 +523,17 @@ class Engine:
         hist = (db.get(self.c, f"{asset.lower()}_accuracy") or [])[-last:]
         if not hist:
             return {"n": 0}
-        corr = 0.0
-        if ASSETS.get(asset, {}).get("basis_correct") and len(hist) >= 3:
-            corr = statistics.median(h["diff"] for h in hist)
-        res = [h["diff"] - corr for h in hist]
+        corr, res = 0.0, [h["diff"] for h in hist]
+        if ASSETS.get(asset, {}).get("basis_correct"):
+            # honest error: each window vs the correction the bot actually had at that moment
+            # (median of the windows before it), so a moving gap shows up as error
+            res = []
+            for i, h in enumerate(hist):
+                prev = hist[max(0, i - self.GAP_WINDOWS):i]
+                if len(prev) >= 3:
+                    res.append(h["diff"] - statistics.median(p["diff"] for p in prev))
+            res = res or [0.0]
+            corr = statistics.median(h["diff"] for h in hist[-self.GAP_WINDOWS:])
         lvl = hist[-1]["kalshi"]
         mae = sum(abs(x) for x in res) / len(res)
         return {"n": len(hist), "mae": round(mae, 2), "mae_pct": round(mae / lvl * 100, 4),
