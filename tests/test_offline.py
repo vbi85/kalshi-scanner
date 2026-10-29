@@ -804,3 +804,18 @@ def test_schwab_contract_keys_map_back_to_root(tmp_path):
     fs.get = lambda *a, **k: FakeResp({"errors": {"invalidSymbols": ["/SI"]}})
     with pytest.raises(RuntimeError, match="no prices for /SI"):
         schwab.quotes(kd, ["/SI"], fs)
+
+
+def test_variant_g_calibrated_odds_needs_a_bigger_gap():
+    from scanner import variants
+    c = Config()
+    p = lambda vid: variants.params(c, next(v for v in variants.VARIANTS if v["id"] == vid))
+    m = {"strike_type": "greater_or_equal", "floor_strike": 100_000}
+    mom = {"dir": "UP", "z": 1.0, "r1": 0.0001, "drift_1m": 0.0001}
+    q = {"yes_ask": 0.50, "yes_ask_size": 50, "no_ask": 0.52, "no_ask_size": 50}
+    small = {"price": 100_040.0, "sigma_1m": 0.0008}       # modest gap: A trades, G does not
+    a, g = (variants.decide(p(v), m, q, small, mom, 6, 5.33, "yes", 1.0) for v in "AG")
+    assert a and g is None
+    big = {"price": 100_400.0, "sigma_1m": 0.0008}         # large gap survives calibration
+    g = variants.decide(p("G"), m, q, big, mom, 6, 5.33, "yes", 1.0)
+    assert g and g["fair"] < 0.99 and g["edge"] >= 0.05

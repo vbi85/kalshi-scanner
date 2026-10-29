@@ -20,10 +20,14 @@ VARIANTS = [
     # added Oct 27 (counts start then): a 20c+ "edge" usually means our price is off, not a real bargain
     {"id": "F", "name": "Skip huge edges", "what": "Current + skip edges above 20¢ (too good to be true)",
      "over": {"max_edge": 0.20}},
+    # added Oct 29: the bot's odds ran ~13 pts too confident (71% vs 58% actual = Kalshi's price).
+    # Trust Kalshi's price 65%, our model 35%; trade only if an edge survives that.
+    {"id": "G", "name": "Calibrated odds", "what": "Current, but odds = 65% Kalshi price + 35% bot model",
+     "over": {"calib_k": 0.35}},
 ]
 
 KEYS = ("min_edge", "max_price", "min_price", "vol_mult", "mom_weight", "mom_min_z", "mom_max_z",
-        "min_ask_size", "slippage", "max_edge")
+        "min_ask_size", "slippage", "max_edge", "calib_k")
 
 
 def params(cfg, variant):
@@ -43,6 +47,9 @@ def decide(p, m, q, px, mom, mins, mins_eff, usd, fee_mult):
     fair = fair_yes(m, px["price"], px["sigma_1m"], mins_eff, p["vol_mult"], drift)
     if fair is None:
         return None
+    if p.get("calib_k") and q.get("yes_ask") and q.get("no_ask"):
+        mid = (q["yes_ask"] + 1 - q["no_ask"]) / 2               # Kalshi's own YES probability
+        fair = mid + p["calib_k"] * (fair - mid)
     side = usd if mom["dir"] == "UP" else ("no" if usd == "yes" else "yes")
     e = edges(fair, q, fee_mult, p["slippage"]).get(side)
     price, size = q[f"{side}_ask"], q[f"{side}_ask_size"]
