@@ -819,3 +819,22 @@ def test_variant_g_calibrated_odds_needs_a_bigger_gap():
     big = {"price": 100_400.0, "sigma_1m": 0.0008}         # large gap survives calibration
     g = variants.decide(p("G"), m, q, big, mom, 6, 5.33, "yes", 1.0)
     assert g and g["fair"] < 0.99 and g["edge"] >= 0.05
+
+
+def test_funding_heads_up_three_days_before_gates(cfg):
+    import dataclasses
+    e, _, _ = run(cfg, [])
+    e.cfg = dataclasses.replace(e.cfg, gate_min_trades=150, gate_min_days=7)
+    sent = []
+    e.alerts.send = lambda msg, **k: sent.append(msg)
+    ok = [{"name": "Net profit after fees", "ok": True}, {"name": "Enough trades", "ok": False},
+          {"name": "Days tested", "ok": False}]
+    s = {"n": 120, "days": 5.0}                       # 24 trades/day -> 30 more trades = 1.25 days; 2 days left
+    assert e.days_to_pass(ok, s) == 2.0
+    assert e.days_to_pass(ok + [{"name": "Profit factor", "ok": False}], s) is None
+    e.funding_heads_up("SILVER", 2.0)
+    e.funding_heads_up("SILVER", 1.5)                 # only one text
+    assert len(sent) == 1 and "$200" in sent[0] and "SILVER" in sent[0]
+    e.funding_heads_up("SILVER", None)                # fell back -> a later heads-up is allowed again
+    e.funding_heads_up("SILVER", 2.5)
+    assert len(sent) == 2

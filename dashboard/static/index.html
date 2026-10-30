@@ -302,6 +302,7 @@
   <div class="muted" id="vnote" style="font-size:13px;margin-top:8px"></div>
 
   <h2>Approval gates — live trading unlocks per market when every box is green</h2>
+  <div id="fundMsg" class="card" style="display:none;border-color:#7a5a00;color:var(--amber);margin-bottom:12px"></div>
   <div class="grid gates" id="gates"></div>
 
   <h2>Recent trades</h2>
@@ -497,9 +498,12 @@ async function load(){
   $('openPos').textContent = `${P.open||0} paper open · ${L.open||0} live open`;
 
   const g = s.gates||{};
+  const near = Object.entries(g).filter(([a,x])=>x.near);
+  $('fundMsg').style.display = near.length ? 'block' : 'none';
+  $('fundMsg').innerHTML = near.map(([a,x])=>`<b>Heads-up:</b> ${esc(lbl(a))} could pass all gates in about <b>${Math.round(x.days_left)} day${Math.round(x.days_left)==1?'':'s'}</b>. Put <b>$200</b> in your Kalshi account if you want it to trade live.`).join('<br>');
   $('gates').innerHTML = Object.keys(g).length ? Object.entries(g).map(([a,x])=>{
     const ok = x.checks.filter(c=>c.ok).length, n = x.checks.length;
-    const chip = x.passed ? '<span class="chip ok">APPROVED</span>' : `<span class="chip no">${ok} / ${n} PASSED</span>`;
+    const chip = x.passed ? '<span class="chip ok">APPROVED</span>' : `<span class="chip no">${ok} / ${n} PASSED${x.days_left?` · ~${Math.round(x.days_left)}d`:''}</span>`;
     const open = innerWidth >= 600 || openGates.has(a) ? ' open' : '';
     return `<details class="card gate" data-asset="${esc(a)}"${open}><summary><div class="gate-head"><b>${esc(lbl(a))}</b>${chip}</div>
       <div class="bar"><div style="width:${100*ok/n}%"></div></div></summary>

@@ -419,6 +419,31 @@ class Engine:
                 db.shadow_void(self.c, t["id"])
         self.check_loss_streak()
 
+    TIME_GATES = ("Enough trades", "Days tested")
+
+    def days_to_pass(self, checks, s):
+        """Days until this market could pass every gate, if all non-time gates already pass. Else None."""
+        if not all(c["ok"] for c in checks if c["name"] not in self.TIME_GATES):
+            return None
+        n, days = s["n"], s["days"]
+        rate = n / max(days, 0.5)
+        need_days = max(0.0, self.cfg.gate_min_days - days)
+        need_trades = max(0, self.cfg.gate_min_trades - n) / rate if rate else float("inf")
+        return round(max(need_days, need_trades), 1)
+
+    def funding_heads_up(self, asset, days_left):
+        """Text once when a market is ~3 days from qualifying for live trading."""
+        key = f"fund_alert_{asset}"
+        if days_left is not None and 0 < days_left <= 3:
+            if not db.get(self.c, key):
+                db.put(self.c, key, time.time())
+                self.alerts.send(f"HEADS-UP: {ASSET_LABEL.get(asset, asset)} could pass all approval gates in about "
+                                 f"{days_left:.0f} day{'s' if round(days_left) != 1 else ''}. If you want it to trade live, "
+                                 f"put $200 in your Kalshi account now. (Nothing trades live until you flip LIVE.)",
+                                 force=True)
+        elif days_left is None or days_left > 5:
+            db.put(self.c, key, None)        # fell back: allow a fresh heads-up later
+
     def update_gates(self):
         for asset in [a for a in ASSET_ORDER if a in {v["asset"] for v in self.series.values()} | {"BTC"}]:
             acc = self.accuracy_stats(asset) if asset in ACCURACY_ASSETS else None
@@ -427,7 +452,10 @@ class Engine:
             passed, checks, s = gates.evaluate(db.settled(self.c, "paper", asset), self.cfg, accuracy=acc,
                                                max_err_pct=limit)
             was = self.gate_status.get(asset, {}).get("passed")
-            self.gate_status[asset] = {"passed": passed, "checks": checks, "stats": s}
+            days_left = self.days_to_pass(checks, s) if not passed else 0.0
+            self.gate_status[asset] = {"passed": passed, "checks": checks, "stats": s,
+                                       "days_left": days_left, "near": bool(days_left is not None and 0 < days_left <= 3)}
+            self.funding_heads_up(asset, days_left)
             if passed and was is False:
                 self.alerts.send(f"{asset} PASSED all approval gates. "
                                  f"{'Live trading active.' if self.mode() == 'live' else 'Flip the switch to LIVE on the dashboard to trade it.'}",
