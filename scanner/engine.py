@@ -79,6 +79,8 @@ class Engine:
         if seed:
             self.seed_settings()
         self.apply_settings()
+        if not db.get(self.c, "exit_since"):
+            db.put(self.c, "exit_since", time.time())
         if db.get(self.c, "variant_set") != variants.VARIANT_SET:      # new test line-up -> fresh counts
             db.put(self.c, "variant_set", variants.VARIANT_SET)
             db.put(self.c, "variant_since", time.time())
@@ -307,6 +309,9 @@ class Engine:
                    conf=fair if side == "yes" else 1 - fair,
                    price=q[f"{side}_ask"] or None, size=q[f"{side}_ask_size"], edge=e)
 
+        if pos and pos["status"] == "open" and mins >= self.EXIT_MIN_LEFT:
+            self.check_exits(pos, q, fair, mins)
+
         if cfg.entry_end_min <= mins <= cfg.entry_start_min and row["close_ts"]:
             self.run_variants(m, info, q, px, mom, mins, mins_eff, usd, row["close_ts"])
 
@@ -375,6 +380,59 @@ class Engine:
                              f"{fill['filled']:.0f} @ {fill['fill_price']:.2f}", force=True)
         else:
             r["note"] += " · live order not filled (price moved)"
+
+    # ---------------- early-exit test (record only, never changes a trade) ----------------
+    EXIT_MIN_LEFT = 0.5          # stop checking in the last 30 seconds
+    EXIT_BUFFER = 0.01           # sell only if selling beats holding by at least 1c
+    EXIT_RULES = {"model": None, "calibrated": 0.35}   # rule -> calibration weight (None = raw bot odds)
+
+    def check_exits(self, pos, q, fair, mins):
+        """Would selling now beat holding? Uses the bot's odds for the side we hold."""
+        if pos["mode"] != "paper" or not q.get("yes_ask") or not q.get("no_ask"):
+            return
+        side = pos["side"]
+        bid = (1 - q["no_ask"]) if side == "yes" else (1 - q["yes_ask"])   # what a buyer pays us now
+        sell = round(bid - self.cfg.slippage, 4)                            # same 1c caution as buying
+        if sell <= 0.01:
+            return
+        fee = taker_fee(sell, 1)
+        mid = (q["yes_ask"] + 1 - q["no_ask"]) / 2
+        for rule, k in self.EXIT_RULES.items():
+            f = fair if k is None else mid + k * (fair - mid)
+            p_hold = f if side == "yes" else 1 - f
+            if sell - fee > p_hold + self.EXIT_BUFFER:
+                reason = "take profit" if sell > pos["price"] else "cut loss"
+                pnl = round(sell - pos["price"] - pos["fee"] - fee, 4)
+                db.exit_record(self.c, trade_id=pos["id"], rule=rule, ts=time.time(), sell_price=sell, fee=fee,
+                               pnl=pnl, hold_odds=round(p_hold, 4), minutes_left=round(mins, 2), reason=reason)
+
+    def exit_stats(self):
+        since = db.get(self.c, "exit_since") or 0
+        trades = [t for t in db.settled(self.c, "paper") if t["ts"] >= since]
+        ex = {}
+        for e in db.exits_all(self.c):
+            ex.setdefault(e["rule"], {})[e["trade_id"]] = e
+        out = [{"rule": "hold", "name": "Hold to settlement (now)", "trades": len(trades), "exits": 0,
+                "pnl": round(sum(t["pnl"] for t in trades), 2), "saved": 0, "gave_up": 0}]
+        names = {"model": "Sell early — bot odds", "calibrated": "Sell early — calibrated odds"}
+        for rule in self.EXIT_RULES:
+            mine = ex.get(rule, {})
+            total = saved = gave = 0.0
+            n = 0
+            for t in trades:
+                e = mine.get(t["id"])
+                if e:
+                    n += 1
+                    total += e["pnl"]
+                    if t["status"] == "lost":
+                        saved += e["pnl"] - t["pnl"]
+                    else:
+                        gave += t["pnl"] - e["pnl"]
+                else:
+                    total += t["pnl"]
+            out.append({"rule": rule, "name": names[rule], "trades": len(trades), "exits": n,
+                        "pnl": round(total, 2), "saved": round(saved, 2), "gave_up": round(gave, 2)})
+        return out
 
     def run_variants(self, m, info, q, px, mom, mins, mins_eff, usd, close_ts):
         fee_mult = info.get("fee_multiplier", 1.0)
@@ -504,6 +562,7 @@ class Engine:
             "variants": variants.stats([r for r in db.shadow_all(self.c)
                                         if r["ts"] >= (db.get(self.c, "variant_since") or 0)]),
             "variant_since": db.get(self.c, "variant_since"),
+            "exit_test": self.exit_stats(),
             "rule_test": self.rule_test(),
             "settings": {"entry_start": self.cfg.entry_start_min, "entry_end": self.cfg.entry_end_min,
                          "min_edge": self.cfg.min_edge, "mom_min_z": self.cfg.mom_min_z,

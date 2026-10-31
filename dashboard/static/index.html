@@ -294,12 +294,19 @@
   <div class="card" id="ruleTest"><div class="empty">No rule change recorded yet.</div></div>
   <div style="margin-top:10px"><button class="btn2" onclick="openSettings()">⚙ Trading settings</button></div>
 
-  <h2>Strategy test — 5 settings paper-trading side by side</h2>
+  <h2>Strategy test — 7 settings paper-trading side by side</h2>
   <div class="tablewrap"><table class="vt">
     <thead><tr><th>#</th><th>Strategy</th><th>Trades</th><th>Win %</th><th>P&amp;L</th><th class="hm">Per trade</th></tr></thead>
     <tbody id="variants"></tbody>
   </table></div>
   <div class="muted" id="vnote" style="font-size:13px;margin-top:8px"></div>
+
+  <h2>Early-exit test — hold vs sell early (record only)</h2>
+  <div class="tablewrap"><table class="vt">
+    <thead><tr><th>Rule</th><th>Sold early</th><th>P&amp;L</th><th class="hm">Losses cut</th><th class="hm">Wins given up</th></tr></thead>
+    <tbody id="exitTest"></tbody>
+  </table></div>
+  <div class="muted" style="font-size:13px;margin-top:8px">Same paper trades, three ways. "Sell early" sells when the bot's odds say the contract is worth less than a buyer will pay. Judge after ~100 trades.</div>
 
   <h2>Approval gates — live trading unlocks per market when every box is green</h2>
   <div id="fundMsg" class="card" style="display:none;border-color:#7a5a00;color:var(--amber);margin-bottom:12px"></div>
@@ -511,6 +518,11 @@ async function load(){
         <span class="v">${esc(c.value)} <span class="muted">/ ${esc(c.target)}</span></span></div>`).join('')}</details>`;
   }).join('') : '<div class="card empty">Waiting for first scan…</div>';
 
+  const X = s.exit_test||[];
+  $('exitTest').innerHTML = X.length ? X.map(x=>`<tr><td><b>${esc(x.name)}</b><small>${x.trades} trades since test start</small></td>
+    <td>${x.rule==='hold'?'—':x.exits}</td><td class="${cls(x.pnl)}">${money(x.pnl)}</td>
+    <td class="hm pos">${x.rule==='hold'?'—':money(x.saved)}</td><td class="hm neg">${x.rule==='hold'?'—':money(x.gave_up)}</td></tr>`).join('')
+    : '<tr><td colspan="5" class="muted">Starting…</td></tr>';
   const V = s.variants||[], minN = V.length ? Math.min(...V.map(v=>v.trades)) : 0;
   $('variants').innerHTML = V.length ? V.map((v,i)=>`<tr class="${i===0&&minN>=30?'lead':''}">
     <td>${i+1}</td><td><b>${esc(v.id)} · ${esc(v.name)}</b><small>${esc(v.what)}</small></td>

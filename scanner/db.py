@@ -32,6 +32,13 @@ CREATE TABLE IF NOT EXISTS shadow (            -- side-by-side strategy test (pa
     UNIQUE(variant, asset, close_ts)            -- one trade per variant per market window
 );
 CREATE INDEX IF NOT EXISTS ix_shadow_status ON shadow(status);
+CREATE TABLE IF NOT EXISTS exits (             -- early-exit test: "what if we had sold?" (record only)
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    trade_id INTEGER NOT NULL, rule TEXT NOT NULL, ts REAL NOT NULL,
+    sell_price REAL NOT NULL, fee REAL NOT NULL, pnl REAL NOT NULL,
+    hold_odds REAL, minutes_left REAL, reason TEXT,
+    UNIQUE(trade_id, rule)                      -- first exit signal only
+);
 """
 
 
@@ -151,3 +158,17 @@ def shadow_void(c, row_id):
 
 def shadow_all(c):
     return [dict(r) for r in c.execute("SELECT * FROM shadow ORDER BY ts")]
+
+
+# ---------------- early-exit test ----------------
+def exit_record(c, **e):
+    try:
+        c.execute(f"INSERT INTO exits({','.join(e)}) VALUES({','.join('?' for _ in e)})", tuple(e.values()))
+        c.commit()
+        return True
+    except sqlite3.IntegrityError:
+        return False
+
+
+def exits_all(c):
+    return [dict(r) for r in c.execute("SELECT * FROM exits")]

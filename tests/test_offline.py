@@ -838,3 +838,25 @@ def test_funding_heads_up_three_days_before_gates(cfg):
     e.funding_heads_up("SILVER", None)                # fell back -> a later heads-up is allowed again
     e.funding_heads_up("SILVER", 2.5)
     assert len(sent) == 2
+
+
+def test_early_exit_test_records_and_scores(cfg):
+    e, _, _ = run(cfg, [])
+    db.put(e.c, "exit_since", 0)
+    db.record_trade(e.c, ts=time.time(), mode="paper", asset="BTC", ticker="EX1", side="yes",
+                    price=0.50, contracts=1, fee=0.02, close_ts=9001)
+    db.record_trade(e.c, ts=time.time(), mode="paper", asset="BTC", ticker="EX2", side="yes",
+                    price=0.50, contracts=1, fee=0.02, close_ts=9002)
+    t1, t2 = sorted(db.open_trades(e.c), key=lambda t: t["ticker"])
+    q = {"yes_ask": 0.20, "no_ask": 0.82}                  # market turned against our YES (bid 0.18)
+    e.check_exits(t1, q, 0.05, 6.0)                        # bot now thinks YES only 5% -> sell
+    e.check_exits(t1, q, 0.05, 5.0)                        # first signal only
+    e.check_exits(t2, {"yes_ask": 0.55, "no_ask": 0.47}, 0.70, 6.0)   # still worth holding -> no exit
+    ex = db.exits_all(e.c)
+    assert {x["rule"] for x in ex} == {"model", "calibrated"} and all(x["trade_id"] == t1["id"] for x in ex)
+    assert ex[0]["reason"] == "cut loss" and ex[0]["sell_price"] == 0.17
+    db.settle(e.c, t1["id"], "no")                         # held -> lost 0.52
+    db.settle(e.c, t2["id"], "yes")                        # held -> won 0.48
+    st = {r["rule"]: r for r in e.exit_stats()}
+    assert st["hold"]["pnl"] == round(-0.52 + 0.48, 2)
+    assert st["model"]["exits"] == 1 and st["model"]["saved"] > 0.1 and st["model"]["pnl"] > st["hold"]["pnl"]
