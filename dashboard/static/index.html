@@ -301,6 +301,9 @@
   </table></div>
   <div class="muted" id="vnote" style="font-size:13px;margin-top:8px"></div>
 
+  <h2>Maker test — resting bids vs taking the ask (paper)</h2>
+  <div class="card" id="makerTest"><div class="empty">Starting…</div></div>
+
   <h2>Early-exit test — hold vs sell early (record only)</h2>
   <div class="tablewrap"><table class="vt">
     <thead><tr><th>Rule</th><th>Sold early</th><th>P&amp;L</th><th class="hm">Losses cut</th><th class="hm">Wins given up</th></tr></thead>
@@ -518,6 +521,20 @@ async function load(){
         <span class="v">${esc(c.value)} <span class="muted">/ ${esc(c.target)}</span></span></div>`).join('')}</details>`;
   }).join('') : '<div class="card empty">Waiting for first scan…</div>';
 
+  const M = s.maker_test;
+  if (M) {
+    const pt = v => v==null ? '—' : (v>=0?'+':'')+(v*100).toFixed(1)+'¢';
+    $('makerTest').innerHTML = `<div class="tablewrap"><table class="vt">
+      <thead><tr><th>Approach</th><th>Trades</th><th>Win %</th><th>P&amp;L</th><th>Per trade</th></tr></thead><tbody>
+      <tr><td><b>Resting bids (maker)</b><small>${M.posted} posted · ${M.filled} filled (${M.fill_rate}%) · ${M.cancelled} cancelled${M.resting?` · ${M.resting} waiting`:''}${M.avg_price?` · avg ${Math.round(M.avg_price*100)}¢`:''}</small></td>
+        <td>${M.settled}</td><td>${M.win_rate==null?'—':M.win_rate+'%'}</td><td class="${cls(M.pnl)}">${money(M.pnl)}</td><td class="${cls(M.per_trade)}">${pt(M.per_trade)}</td></tr>
+      <tr><td><b>Taking the ask (now, A)</b><small>same period</small></td>
+        <td>${M.a_all_n}</td><td>—</td><td class="${cls(M.a_all_pnl)}">${money(M.a_all_pnl)}</td><td class="${cls(M.a_per_trade)}">${pt(M.a_per_trade)}</td></tr>
+      <tr><td><b>A on the same windows the bids filled</b><small>head-to-head</small></td>
+        <td>${M.a_same_n}</td><td>—</td><td class="${cls(M.a_same_pnl)}">${money(M.a_same_pnl)}</td><td>—</td></tr>
+      </tbody></table></div>
+      <div class="muted" style="font-size:13px;margin-top:8px">Bids join or beat the best bid, never chase the ask, 50¢–75¢ only, skipped if spread &gt;18¢ or under 10 contracts, cancelled at 2:30 left. Counted as filled only when sellers trade <b>through</b> our price. No fee on fills (Kalshi 15-min markets charge no maker fee). Judge on <b>per trade</b> and <b>fill rate</b>.</div>`;
+  }
   const X = s.exit_test||[];
   $('exitTest').innerHTML = X.length ? X.map(x=>`<tr><td><b>${esc(x.name)}</b><small>${x.trades} trades since test start</small></td>
     <td>${x.rule==='hold'?'—':x.exits}</td><td class="${cls(x.pnl)}">${money(x.pnl)}</td>

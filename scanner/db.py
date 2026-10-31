@@ -39,6 +39,15 @@ CREATE TABLE IF NOT EXISTS exits (             -- early-exit test: "what if we h
     hold_odds REAL, minutes_left REAL, reason TEXT,
     UNIQUE(trade_id, rule)                      -- first exit signal only
 );
+CREATE TABLE IF NOT EXISTS maker (             -- maker test: resting limit bids instead of taking the ask
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts REAL NOT NULL, asset TEXT, ticker TEXT NOT NULL, close_ts REAL,
+    side TEXT NOT NULL, direction TEXT, limit_price REAL NOT NULL, ask_at_post REAL,
+    fair REAL, mom_z REAL, minutes_left REAL,
+    status TEXT NOT NULL DEFAULT 'resting',     -- resting | filled | cancelled | won | lost | void
+    fill_ts REAL, fee REAL NOT NULL DEFAULT 0, pnl REAL, settled_ts REAL,
+    UNIQUE(asset, close_ts)                     -- one order per market window
+);
 """
 
 
@@ -172,3 +181,31 @@ def exit_record(c, **e):
 
 def exits_all(c):
     return [dict(r) for r in c.execute("SELECT * FROM exits")]
+
+
+# ---------------- maker (resting order) test ----------------
+def maker_record(c, **o):
+    try:
+        c.execute(f"INSERT INTO maker({','.join(o)}) VALUES({','.join('?' for _ in o)})", tuple(o.values()))
+        c.commit()
+        return True
+    except sqlite3.IntegrityError:
+        return False
+
+
+def maker_window(c, asset, close_ts):
+    r = c.execute("SELECT * FROM maker WHERE asset=? AND close_ts=?", (asset, close_ts)).fetchone()
+    return dict(r) if r else None
+
+
+def maker_update(c, row_id, **f):
+    c.execute(f"UPDATE maker SET {','.join(k + '=?' for k in f)} WHERE id=?", (*f.values(), row_id))
+    c.commit()
+
+
+def maker_open(c):
+    return [dict(r) for r in c.execute("SELECT * FROM maker WHERE status='filled'")]
+
+
+def maker_all(c):
+    return [dict(r) for r in c.execute("SELECT * FROM maker ORDER BY ts")]

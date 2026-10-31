@@ -860,3 +860,40 @@ def test_early_exit_test_records_and_scores(cfg):
     st = {r["rule"]: r for r in e.exit_stats()}
     assert st["hold"]["pnl"] == round(-0.52 + 0.48, 2)
     assert st["model"]["exits"] == 1 and st["model"]["saved"] > 0.1 and st["model"]["pnl"] > st["hold"]["pnl"]
+
+
+def test_maker_bid_posts_fills_through_and_cancels(cfg):
+    e, _, _ = run(cfg, [])
+    db.put(e.c, "maker_since", 0)
+    info = {"asset": "BTC"}
+    mom = {"dir": "UP", "z": 1.2, "r1": 0.0002, "drift_1m": 0.0001}
+    m = {"ticker": "MK1"}
+    q = {"yes_ask": 0.60, "yes_ask_size": 50, "no_ask": 0.45, "no_ask_size": 50}   # YES bid 0.55, spread 5c
+    e.run_maker(m, info, q, 0.72, mom, 6.0, "yes", 5000)
+    o = db.maker_window(e.c, "BTC", 5000)
+    assert o["status"] == "resting" and o["limit_price"] == 0.56 and o["side"] == "yes"   # bid + 1c, under ask
+    e.run_maker(m, info, dict(q, yes_ask=0.56), 0.72, mom, 5.0, "yes", 5000)              # touches: not filled
+    assert db.maker_window(e.c, "BTC", 5000)["status"] == "resting"
+    e.run_maker(m, info, dict(q, yes_ask=0.55), 0.72, mom, 4.5, "yes", 5000)              # through: filled
+    assert db.maker_window(e.c, "BTC", 5000)["status"] == "filled"
+    # second window: never fills -> cancelled at 2:30
+    e.run_maker({"ticker": "MK2"}, info, q, 0.72, mom, 6.0, "yes", 6000)
+    e.run_maker({"ticker": "MK2"}, info, q, 0.72, mom, 2.4, "yes", 6000)
+    assert db.maker_window(e.c, "BTC", 6000)["status"] == "cancelled"
+    # too wide / too thin / under 50c floor -> no order
+    e.run_maker({"ticker": "MK3"}, info, dict(q, no_ask=0.70), 0.72, mom, 6.0, "yes", 7000)    # spread 30c
+    e.run_maker({"ticker": "MK4"}, info, dict(q, no_ask_size=5), 0.72, mom, 6.0, "yes", 8000)  # thin bid
+    e.run_maker({"ticker": "MK5"}, info, dict(q, yes_ask=0.48, no_ask=0.56), 0.72, mom, 6.0, "yes", 9000)
+    assert all(db.maker_window(e.c, "BTC", w) is None for w in (7000, 8000, 9000))
+    st = e.maker_stats()
+    assert st["posted"] == 2 and st["filled"] == 1 and st["fill_rate"] == 50.0
+
+
+def test_maker_fill_settles(cfg):
+    e, pub, _ = run(cfg, [])
+    db.maker_record(e.c, ts=time.time(), asset="BTC", ticker="KXBTC15M-MS", close_ts=1, side="no",
+                    limit_price=0.55, status="filled")
+    pub.results["KXBTC15M-MS"] = "no"
+    e.settle_open()
+    o = db.maker_window(e.c, "BTC", 1)
+    assert o["status"] == "won" and o["pnl"] == 0.45

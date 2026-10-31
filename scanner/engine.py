@@ -79,6 +79,8 @@ class Engine:
         if seed:
             self.seed_settings()
         self.apply_settings()
+        if not db.get(self.c, "maker_since"):
+            db.put(self.c, "maker_since", time.time())
         if not db.get(self.c, "exit_since"):
             db.put(self.c, "exit_since", time.time())
         if db.get(self.c, "variant_set") != variants.VARIANT_SET:      # new test line-up -> fresh counts
@@ -312,6 +314,9 @@ class Engine:
         if pos and pos["status"] == "open" and mins >= self.EXIT_MIN_LEFT:
             self.check_exits(pos, q, fair, mins)
 
+        if row["close_ts"]:
+            self.run_maker(m, info, q, fair, mom, mins, usd, row["close_ts"])
+
         if cfg.entry_end_min <= mins <= cfg.entry_start_min and row["close_ts"]:
             self.run_variants(m, info, q, px, mom, mins, mins_eff, usd, row["close_ts"])
 
@@ -434,6 +439,71 @@ class Engine:
                         "pnl": round(total, 2), "saved": round(saved, 2), "gave_up": round(gave, 2)})
         return out
 
+    # ---------------- maker test: resting limit bids (paper only) ----------------
+    MAKER_FLOOR = 0.50          # Burt: no resting bids under 50c
+    MAKER_MAX_SPREAD = 0.18     # skip if the book is too wide
+    MAKER_MIN_SIZE = 10         # skip if top of book is too thin
+    MAKER_CANCEL_EXTRA = 0.5    # cancel unfilled bids 30s before the 2:00 no-trade line
+
+    def run_maker(self, m, info, q, fair, mom, mins, usd, close_ts):
+        cfg, asset = self.cfg, info["asset"]
+        o = db.maker_window(self.c, asset, close_ts)
+        if o and o["status"] == "resting":
+            side = o["side"]
+            ask = q[f"{side}_ask"]
+            if mins < cfg.entry_end_min + self.MAKER_CANCEL_EXTRA:
+                db.maker_update(self.c, o["id"], status="cancelled")          # cancels are free
+            elif ask and ask <= o["limit_price"] - 0.01:
+                # conservative fill: only when sellers come THROUGH our price (we may not be first in line)
+                db.maker_update(self.c, o["id"], status="filled", fill_ts=time.time(),
+                                fee=taker_fee(o["limit_price"], 1, info.get("maker_fee_multiplier", 0.0))
+                                if info.get("maker_fee_multiplier") else 0.0)
+            return
+        if o or not (cfg.entry_end_min + self.MAKER_CANCEL_EXTRA <= mins <= cfg.entry_start_min):
+            return
+        if abs(mom["z"]) < cfg.mom_min_z or mom["r1"] * mom["drift_1m"] < 0:
+            return
+        if cfg.mom_max_z and abs(mom["z"]) > cfg.mom_max_z:
+            return
+        side = usd if mom["dir"] == "UP" else ("no" if usd == "yes" else "yes")
+        other = "no" if side == "yes" else "yes"
+        ask, ask_size = q[f"{side}_ask"], q[f"{side}_ask_size"]
+        bid, bid_size = (1 - q[f"{other}_ask"]) if q[f"{other}_ask"] else 0.0, q[f"{other}_ask_size"]
+        if not ask or bid <= 0 or ask - bid > self.MAKER_MAX_SPREAD:
+            return
+        if min(ask_size or 0, bid_size or 0) < self.MAKER_MIN_SIZE:
+            return
+        p_side = fair if side == "yes" else 1 - fair
+        limit = round(min(bid + 0.01, p_side - cfg.min_edge, cfg.max_price), 2)   # join/improve the bid, never chase
+        if limit >= ask:
+            limit = round(ask - 0.01, 2)                                        # stay a maker
+        if limit < max(self.MAKER_FLOOR, cfg.min_price):
+            return
+        db.maker_record(self.c, ts=time.time(), asset=asset, ticker=m["ticker"], close_ts=close_ts, side=side,
+                        direction=mom["dir"], limit_price=limit, ask_at_post=ask, fair=round(fair, 4),
+                        mom_z=round(mom["z"], 3), minutes_left=round(mins, 2))
+
+    def maker_stats(self):
+        since = db.get(self.c, "maker_since") or 0
+        rows = [r for r in db.maker_all(self.c) if r["ts"] >= since]
+        done = [r for r in rows if r["status"] in ("won", "lost")]
+        a_trades = {(t["asset"], t["close_ts"]): t for t in db.settled(self.c, "paper") if t["ts"] >= since}
+        a_same = [a_trades[(r["asset"], r["close_ts"])] for r in done if (r["asset"], r["close_ts"]) in a_trades]
+        wins = sum(r["status"] == "won" for r in done)
+        pnl = sum(r["pnl"] for r in done)
+        a_all = list(a_trades.values())
+        return {"posted": len(rows), "filled": sum(r["status"] in ("filled", "won", "lost") for r in rows),
+                "cancelled": sum(r["status"] == "cancelled" for r in rows),
+                "resting": sum(r["status"] == "resting" for r in rows),
+                "fill_rate": round(100 * sum(r["status"] in ("filled", "won", "lost") for r in rows)
+                                   / max(1, sum(r["status"] != "resting" for r in rows)), 1),
+                "settled": len(done), "win_rate": round(100 * wins / len(done), 1) if done else None,
+                "pnl": round(pnl, 2), "per_trade": round(pnl / len(done), 3) if done else None,
+                "avg_price": round(sum(r["limit_price"] for r in done) / len(done), 3) if done else None,
+                "a_same_n": len(a_same), "a_same_pnl": round(sum(t["pnl"] for t in a_same), 2),
+                "a_all_n": len(a_all), "a_all_pnl": round(sum(t["pnl"] for t in a_all), 2),
+                "a_per_trade": round(sum(t["pnl"] for t in a_all) / len(a_all), 3) if a_all else None}
+
     def run_variants(self, m, info, q, px, mom, mins, mins_eff, usd, close_ts):
         fee_mult = info.get("fee_multiplier", 1.0)
         for v in variants.VARIANTS:
@@ -445,9 +515,10 @@ class Engine:
     def settle_open(self):
         open_t = db.open_trades(self.c)
         open_s = db.shadow_open(self.c)
-        if not open_t and not open_s:
+        open_m = db.maker_open(self.c)
+        if not open_t and not open_s and not open_m:
             return
-        tickers = sorted({t["ticker"] for t in open_t} | {t["ticker"] for t in open_s})
+        tickers = sorted({t["ticker"] for t in open_t} | {t["ticker"] for t in open_s} | {t["ticker"] for t in open_m})
         try:
             mk = {m["ticker"]: m for m in self.pub.markets_by_tickers(tickers)}
         except Exception as e:
@@ -475,6 +546,17 @@ class Engine:
                 db.shadow_settle(self.c, t["id"], res)
             elif m.get("status") in ("finalized", "settled"):
                 db.shadow_void(self.c, t["id"])
+        for o in open_m:
+            m = mk.get(o["ticker"])
+            if not m:
+                continue
+            res = (m.get("result") or "").lower()
+            if res in ("yes", "no"):
+                won = res == o["side"]
+                db.maker_update(self.c, o["id"], status="won" if won else "lost", settled_ts=time.time(),
+                                pnl=round((1 - o["limit_price"] if won else -o["limit_price"]) - o["fee"], 4))
+            elif m.get("status") in ("finalized", "settled"):
+                db.maker_update(self.c, o["id"], status="void", pnl=0, settled_ts=time.time())
         self.check_loss_streak()
 
     TIME_GATES = ("Enough trades", "Days tested")
@@ -563,6 +645,7 @@ class Engine:
                                         if r["ts"] >= (db.get(self.c, "variant_since") or 0)]),
             "variant_since": db.get(self.c, "variant_since"),
             "exit_test": self.exit_stats(),
+            "maker_test": self.maker_stats(),
             "rule_test": self.rule_test(),
             "settings": {"entry_start": self.cfg.entry_start_min, "entry_end": self.cfg.entry_end_min,
                          "min_edge": self.cfg.min_edge, "mom_min_z": self.cfg.mom_min_z,
