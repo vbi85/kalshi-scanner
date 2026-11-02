@@ -897,3 +897,20 @@ def test_maker_fill_settles(cfg):
     e.settle_open()
     o = db.maker_window(e.c, "BTC", 1)
     assert o["status"] == "won" and o["pnl"] == 0.45
+
+
+def test_variant_h_daytime_only():
+    from datetime import datetime
+    from scanner import variants
+    c = Config()
+    v = next(v for v in variants.VARIANTS if v["id"] == "H")
+    m = {"strike_type": "greater_or_equal", "floor_strike": 100_000}
+    q = {"yes_ask": 0.44, "yes_ask_size": 50, "no_ask": 0.60, "no_ask_size": 50}
+    px = {"price": 100_010.0, "sigma_1m": 0.0008}
+    mom = {"dir": "UP", "z": 1.0, "r1": 0.0001, "drift_1m": 0.0001}
+    p = variants.params(c, v)
+    day = dict(p, _now=datetime(2026, 11, 2, 10, 0, tzinfo=variants.TZ))
+    night = dict(p, _now=datetime(2026, 11, 2, 22, 0, tzinfo=variants.TZ))
+    a = variants.decide(variants.params(c, variants.VARIANTS[0]), m, q, px, mom, 6, 5.33, "yes", 1.0)
+    assert a and variants.decide(day, m, q, px, mom, 6, 5.33, "yes", 1.0)
+    assert variants.decide(night, m, q, px, mom, 6, 5.33, "yes", 1.0) is None

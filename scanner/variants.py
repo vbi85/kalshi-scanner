@@ -5,7 +5,13 @@ comparable. Variants never place real orders and never affect the approval gates
 the bot's main strategy (and live trading) is untouched.
 To change what is tested, edit VARIANTS below and run kalshi-update.
 """
+import os
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
 from .model import edges, fair_yes, taker_fee
+
+TZ = ZoneInfo(os.getenv("TZ_NAME", "America/Chicago"))
 
 # Change VARIANT_SET whenever the list changes: the dashboard then restarts the counts.
 VARIANT_SET = "v2-2026-10-25"
@@ -24,10 +30,13 @@ VARIANTS = [
     # Trust Kalshi's price 65%, our model 35%; trade only if an edge survives that.
     {"id": "G", "name": "Calibrated odds", "what": "Current, but odds = 65% Kalshi price + 35% bot model",
      "over": {"calib_k": 0.35}},
+    # added Nov 1: 8 PM-8 AM lost $7.82 on 149 trades; 8 AM-8 PM made $2.68 on 151
+    {"id": "H", "name": "Daytime only", "what": "Current, but only trades 8 AM-8 PM Central",
+     "over": {"day_hours": (8, 20)}},
 ]
 
 KEYS = ("min_edge", "max_price", "min_price", "vol_mult", "mom_weight", "mom_min_z", "mom_max_z",
-        "min_ask_size", "slippage", "max_edge", "calib_k")
+        "min_ask_size", "slippage", "max_edge", "calib_k", "day_hours")
 
 
 def params(cfg, variant):
@@ -39,6 +48,10 @@ def params(cfg, variant):
 def decide(p, m, q, px, mom, mins, mins_eff, usd, fee_mult):
     """Return a trade dict if this variant would trade right now, else None.
     Caller has already checked: inside the 7:30–2:00 window, live price, momentum available."""
+    if p.get("day_hours"):
+        start, end = p["day_hours"]
+        if not (start <= (p.get("_now") or datetime.now(TZ)).hour < end):
+            return None
     if abs(mom["z"]) < p["mom_min_z"] or mom["r1"] * mom["drift_1m"] < 0:
         return None
     if p.get("mom_max_z") and abs(mom["z"]) > p["mom_max_z"]:
