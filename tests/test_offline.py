@@ -75,6 +75,13 @@ def make_price_fn(btc=None):
     return fn
 
 
+@pytest.fixture(autouse=True)
+def _always_trading_hours(monkeypatch, request):
+    """Tests run at any time of day: keep the 8 AM-8 PM rule out of the way except where tested."""
+    if "trading_hours" not in request.node.name:
+        monkeypatch.setattr(Engine, "trading_hours_open", lambda self, now=None: True)
+
+
 @pytest.fixture
 def cfg(tmp_path):
     c = Config()
@@ -914,3 +921,27 @@ def test_variant_h_daytime_only():
     a = variants.decide(variants.params(c, variants.VARIANTS[0]), m, q, px, mom, 6, 5.33, "yes", 1.0)
     assert a and variants.decide(day, m, q, px, mom, 6, 5.33, "yes", 1.0)
     assert variants.decide(night, m, q, px, mom, 6, 5.33, "yes", 1.0) is None
+
+
+
+def test_trading_hours_daytime_rule(cfg):
+    from datetime import datetime
+    from scanner.engine import TZ
+    e, _, _ = run(cfg, [])
+    assert e.cfg.trade_start_hour == 8 and e.cfg.trade_end_hour == 20          # seeded once
+    assert db.get(e.c, "rules_changed_what").startswith("Daytime only")
+    at = lambda h, m=0: datetime(2026, 11, 3, h, m, tzinfo=TZ)
+    assert e.trading_hours_open(at(8)) and e.trading_hours_open(at(19, 59))
+    assert not e.trading_hours_open(at(20)) and not e.trading_hours_open(at(3))
+    assert e.hours_text() == "8 AM–8 PM"
+    db.put(e.c, "settings", {"trade_start_hour": 0, "trade_end_hour": 24})      # all day again from phone
+    e.apply_settings()
+    assert e.trading_hours_open(at(3))
+
+
+def test_trading_hours_seed_upgrade_keeps_old_rules(cfg):
+    c = db.connect(cfg.db_path)
+    db.put(c, "settings_seed", "2026-10-25-momentum-0.8-price-40-75")         # server that had the old seed
+    db.put(c, "settings", {"mom_min_z": 0.8, "min_price": 0.50, "max_price": 0.75})   # Burt's 50c change
+    e = Engine(cfg, public=FakePublic(), price_fn=make_price_fn(), conn=c)
+    assert e.cfg.min_price == 0.50 and e.cfg.trade_start_hour == 8           # phone edit kept, hours added

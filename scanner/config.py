@@ -54,6 +54,8 @@ class Config:
     mom_lookback_min: int = int(_env("MOM_LOOKBACK_MIN", "5"))      # momentum measured over last 5 min
     mom_min_z: float = float(_env("MOM_MIN_Z", "0.5"))              # minimum momentum strength (std devs)
     mom_weight: float = float(_env("MOM_WEIGHT", "0.25"))           # how much momentum carries forward
+    trade_start_hour: float = float(_env("TRADE_START_HOUR", "0"))   # Central time; 0 and 24 = all day
+    trade_end_hour: float = float(_env("TRADE_END_HOUR", "24"))
     mom_max_z: float = float(_env("MOM_MAX_Z", "0"))                # 0 = no cap; e.g. 2.0 skips big spikes
     min_edge: float = float(_env("MIN_EDGE", "0.05"))           # $ per contract after fees + slippage
     min_ask_size: float = float(_env("MIN_ASK_SIZE", "5"))
@@ -162,8 +164,18 @@ EDITABLE = {
     "min_edge":   ("Minimum edge ($ per contract)", 0.0, 0.50, 0.01),
     "vol_mult":   ("Volatility multiplier", 0.5, 3.0, 0.05),
     "mom_weight": ("Momentum weight", 0.0, 1.0, 0.05),
+    "trade_start_hour": ("Trading starts (hour, Central; 8 = 8 AM)", 0.0, 24.0, 0.5),
+    "trade_end_hour":   ("Trading stops (hour, Central; 20 = 8 PM)", 0.0, 24.0, 0.5),
 }
 
-# One-time rule change applied on update (Oct 25, 2026): momentum 0.8+, prices 40¢–75¢
-SEED_SETTINGS = {"id": "2026-10-25-momentum-0.8-price-40-75",
-                 "values": {"mom_min_z": 0.8, "min_price": 0.40, "max_price": 0.75}}
+# One-time rule changes shipped with updates, applied in order, once per server
+# (later edits from the phone Settings panel are kept).
+SEED_SETTINGS = [
+    {"id": "2026-10-25-momentum-0.8-price-40-75",
+     "values": {"mom_min_z": 0.8, "min_price": 0.40, "max_price": 0.75},
+     "what": "Momentum 0.8+, prices 40¢–75¢"},
+    # Nov 3: 2 weeks of data: 8 AM-8 PM +$1.91 on 202 trades, 8 PM-8 AM -$18.06 on 217
+    {"id": "2026-11-03-daytime-8-20",
+     "values": {"trade_start_hour": 8.0, "trade_end_hour": 20.0},
+     "what": "Daytime only: 8 AM–8 PM Central"},
+]

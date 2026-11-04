@@ -133,15 +133,20 @@ class Engine:
 
     # ---------------- settings from the dashboard ----------------
     def seed_settings(self):
-        """Apply a one-time rule change shipped with an update (only once per server)."""
-        if db.get(self.c, "settings_seed") == SEED_SETTINGS["id"]:
-            return
-        cur = db.get(self.c, "settings") or {}
-        cur.update(SEED_SETTINGS["values"])
-        db.put(self.c, "settings", cur)
-        db.put(self.c, "settings_seed", SEED_SETTINGS["id"])
-        db.put(self.c, "rules_changed_at", time.time())
-        db.put(self.c, "rules_changed_what", "Momentum 0.8+, prices 40¢–75¢")
+        """Apply one-time rule changes shipped with updates (each only once per server)."""
+        done = set(db.get(self.c, "settings_seeds") or [])
+        if db.get(self.c, "settings_seed"):                  # older servers stored just one id
+            done.add(db.get(self.c, "settings_seed"))
+        for seed in SEED_SETTINGS:
+            if seed["id"] in done:
+                continue
+            cur = db.get(self.c, "settings") or {}
+            cur.update(seed["values"])
+            db.put(self.c, "settings", cur)
+            done.add(seed["id"])
+            db.put(self.c, "settings_seeds", sorted(done))
+            db.put(self.c, "rules_changed_at", time.time())
+            db.put(self.c, "rules_changed_what", seed.get("what", "settings changed"))
 
     def rule_test(self, hours=24):
         """Before/after scorecard for the last rule change: 24h before it vs everything since."""
@@ -162,6 +167,19 @@ class Engine:
         return {"what": db.get(self.c, "rules_changed_what") or "", "since": t0, "hours": hours,
                 "elapsed_h": round((time.time() - t0) / 3600, 1),
                 "before": summary(before), "after": summary(after)}
+
+    def trading_hours_open(self, now=None):
+        """Main strategy only trades inside the hours set on the dashboard (Central time)."""
+        a, b = self.cfg.trade_start_hour, self.cfg.trade_end_hour
+        if a <= 0 and b >= 24:
+            return True
+        now = now or datetime.now(TZ)
+        h = now.hour + now.minute / 60
+        return a <= h < b if a < b else (h >= a or h < b)      # also allows overnight ranges like 20 -> 8
+
+    def hours_text(self):
+        f = lambda x: datetime(2000, 1, 1, int(x) % 24, int(round((x % 1) * 60))).strftime("%-I:%M %p").replace(":00", "")
+        return f"{f(self.cfg.trade_start_hour)}–{f(self.cfg.trade_end_hour)}"
 
     def apply_settings(self):
         over = {k: float(v) for k, v in (db.get(self.c, "settings") or {}).items() if k in EDITABLE}
@@ -326,6 +344,8 @@ class Engine:
             row["status"], row["note"] = "WAITING", f"trading opens in {mmss(mins - cfg.entry_start_min)}"
         elif mins < cfg.entry_end_min:
             row["status"], row["note"] = "CLOSED", f"no new trades under {mmss(cfg.entry_end_min)}"
+        elif not self.trading_hours_open():
+            row["status"], row["note"] = "WAITING", f"outside trading hours ({self.hours_text()} Central)"
         elif abs(mom["z"]) < cfg.mom_min_z:
             row["status"], row["note"] = "SETUP FORMING", f"momentum weak ({abs(mom['z']):.2f} / {cfg.mom_min_z:g})"
         elif cfg.mom_max_z and abs(mom["z"]) > cfg.mom_max_z:
@@ -460,6 +480,8 @@ class Engine:
                                 if info.get("maker_fee_multiplier") else 0.0)
             return
         if o or not (cfg.entry_end_min + self.MAKER_CANCEL_EXTRA <= mins <= cfg.entry_start_min):
+            return
+        if not self.trading_hours_open():                  # same hours as the main strategy
             return
         if abs(mom["z"]) < cfg.mom_min_z or mom["r1"] * mom["drift_1m"] < 0:
             return

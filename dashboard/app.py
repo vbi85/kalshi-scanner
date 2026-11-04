@@ -407,6 +407,9 @@ def save_settings():
     hi_p = cur.get("max_price", cfg.max_price)
     if lo_p >= hi_p:
         return jsonify(ok=False, error="Lowest price must be below highest price"), 400
+    if cur.get("trade_start_hour", cfg.trade_start_hour) == cur.get("trade_end_hour", cfg.trade_end_hour) \
+            and cur.get("trade_start_hour", cfg.trade_start_hour) not in (0, 24):
+        return jsonify(ok=False, error="Start and stop hours can't be the same (use 0 and 24 for all day)"), 400
     if not changed:
         return jsonify(ok=True, changed=[])
     db.put(conn, "settings", cur)
