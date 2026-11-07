@@ -375,6 +375,52 @@ def sheet_daily_csv(token):
     return Response(buf.getvalue(), mimetype="text/csv", headers={"Cache-Control": "no-store"})
 
 
+@app.get("/sheet/<token>/tests.csv")
+def sheet_tests_csv(token):
+    """Strategy test, maker test and early-exit test results, for a 'Tests' tab in the sheet."""
+    good = db.get(conn, "sheet_token")
+    if not good or not hmac.compare_digest(token, good):
+        return Response("not found", 404)
+    st = db.get(conn, "state", {}) or {}
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    w.writerow(["Test", "Name", "What it does", "Trades", "Win %", "P&L", "Per trade (cents)", "Notes"])
+    for v in st.get("variants") or []:
+        w.writerow(["Strategy", f'{v["id"]} {v["name"]}', v["what"], v["trades"],
+                    "" if v["win_rate"] is None else v["win_rate"], f'{v["pnl"]:.2f}',
+                    "" if v["per_trade"] is None else round(v["per_trade"] * 100, 1), f'{v.get("open", 0)} open'])
+    m = st.get("maker_test")
+    if m:
+        w.writerow(["Maker", "Resting bids", "Join/beat best bid, never take the ask", m["settled"],
+                    "" if m["win_rate"] is None else m["win_rate"], f'{m["pnl"]:.2f}',
+                    "" if m["per_trade"] is None else round(m["per_trade"] * 100, 1),
+                    f'{m["posted"]} posted, {m["filled"]} filled ({m["fill_rate"]}%), {m["cancelled"]} cancelled'])
+        w.writerow(["Maker", "Taking the ask (A)", "Same period", m["a_all_n"], "", f'{m["a_all_pnl"]:.2f}',
+                    "" if m["a_per_trade"] is None else round(m["a_per_trade"] * 100, 1),
+                    f'A on same windows as fills: {m["a_same_n"]} trades, {m["a_same_pnl"]:.2f}'])
+    for x in st.get("exit_test") or []:
+        w.writerow(["Early exit", x["name"], "", x["trades"], "", f'{x["pnl"]:.2f}', "",
+                    "" if x["rule"] == "hold" else f'{x["exits"]} sold early; losses cut {x["saved"]:.2f}; wins given up {x["gave_up"]:.2f}'])
+    w.writerow([])
+    w.writerow(["Updated", datetime.fromtimestamp(st.get("ts") or time.time(), TZ).strftime("%a %b %d · %I:%M %p"),
+                "Since: strategies " + (datetime.fromtimestamp(st["variant_since"], TZ).strftime("%b %d %I:%M %p")
+                                        if st.get("variant_since") else "?")])
+    return Response(buf.getvalue(), mimetype="text/csv", headers={"Cache-Control": "no-store"})
+
+
+@app.post("/api/markets")
+@auth
+def set_market():
+    body = request.get_json(silent=True) or {}
+    asset = (body.get("asset") or "").upper()
+    if asset not in ASSET_LABEL:
+        return jsonify(ok=False, error="unknown market"), 400
+    cur = set(db.get(conn, "paused_assets") or [])
+    (cur.add if body.get("paused") else cur.discard)(asset)
+    db.put(conn, "paused_assets", sorted(cur))
+    return jsonify(ok=True, paused=sorted(cur))
+
+
 # ---------------- settings from the phone ----------------
 @app.get("/api/settings")
 @auth

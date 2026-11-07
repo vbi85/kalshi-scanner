@@ -178,4 +178,7 @@ SEED_SETTINGS = [
     {"id": "2026-11-03-daytime-8-20",
      "values": {"trade_start_hour": 8.0, "trade_end_hour": 20.0},
      "what": "Daytime only: 8 AM–8 PM Central"},
+    # Nov 7: since the Nov 4 fixes BTC +$1.71 and Gold +$2.09; Silver/Oil/Nat Gas -$7.11 combined
+    {"id": "2026-11-07-btc-gold-only", "paused": ["SILVER", "WTI", "NATGAS"],
+     "what": "Main strategy BTC + Gold only (Silver/Oil/Gas paused)"},
 ]

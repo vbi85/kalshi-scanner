@@ -33,10 +33,14 @@ VARIANTS = [
     # added Nov 1: 8 PM-8 AM lost $7.82 on 149 trades; 8 AM-8 PM made $2.68 on 151
     {"id": "H", "name": "Daytime only", "what": "Current, but only trades 8 AM-8 PM Central",
      "over": {"day_hours": (8, 20)}},
+    # added Nov 7: the only strategy family profitable in a 4,904-strategy Kalshi BTC 15-min backtest
+    # was "panic fade" (bet AGAINST sharp moves). Our bot bets WITH them. P tests the opposite.
+    {"id": "P", "name": "Panic fade", "what": "Bet AGAINST sharp moves (momentum 1.5+), cheap side 25¢–55¢",
+     "over": {"fade_z": 1.5, "fade_min": 0.25, "fade_max": 0.55}},
 ]
 
 KEYS = ("min_edge", "max_price", "min_price", "vol_mult", "mom_weight", "mom_min_z", "mom_max_z",
-        "min_ask_size", "slippage", "max_edge", "calib_k", "day_hours")
+        "min_ask_size", "slippage", "max_edge", "calib_k", "day_hours", "fade_z", "fade_min", "fade_max")
 
 
 def params(cfg, variant):
@@ -52,6 +56,8 @@ def decide(p, m, q, px, mom, mins, mins_eff, usd, fee_mult):
         start, end = p["day_hours"]
         if not (start <= (p.get("_now") or datetime.now(TZ)).hour < end):
             return None
+    if p.get("fade_z"):
+        return _fade(p, m, q, px, mom, mins, mins_eff, usd, fee_mult)
     if abs(mom["z"]) < p["mom_min_z"] or mom["r1"] * mom["drift_1m"] < 0:
         return None
     if p.get("mom_max_z") and abs(mom["z"]) > p["mom_max_z"]:
@@ -75,6 +81,23 @@ def decide(p, m, q, px, mom, mins, mins_eff, usd, fee_mult):
     fill = round(min(0.99, price + p["slippage"]), 4)          # same paper fill rule as the main bot
     return {"side": side, "price": fill, "fee": taker_fee(fill, 1, fee_mult), "fair": round(fair, 4),
             "edge": round(e, 4), "direction": mom["dir"], "mom_z": round(mom["z"], 3),
+            "minutes_left": round(mins, 2)}
+
+
+def _fade(p, m, q, px, mom, mins, mins_eff, usd, fee_mult):
+    """Panic fade: after a sharp move, buy the cheap side betting it snaps back. No model edge needed."""
+    if abs(mom["z"]) < p["fade_z"]:
+        return None
+    with_move = usd if mom["dir"] == "UP" else ("no" if usd == "yes" else "yes")
+    side = "no" if with_move == "yes" else "yes"                       # the opposite side
+    price, size = q[f"{side}_ask"], q[f"{side}_ask_size"]
+    if not price or not (p["fade_min"] <= price <= p["fade_max"]) or size < p["min_ask_size"]:
+        return None
+    fair = fair_yes(m, px["price"], px["sigma_1m"], mins_eff, p["vol_mult"], 0.0)    # plain model, for reference
+    fill = round(min(0.99, price + p["slippage"]), 4)
+    return {"side": side, "price": fill, "fee": taker_fee(fill, 1, fee_mult),
+            "fair": None if fair is None else round(fair, 4), "edge": 0.0,
+            "direction": "DOWN" if mom["dir"] == "UP" else "UP", "mom_z": round(mom["z"], 3),
             "minutes_left": round(mins, 2)}
 
 

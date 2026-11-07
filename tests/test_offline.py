@@ -929,7 +929,7 @@ def test_trading_hours_daytime_rule(cfg):
     from scanner.engine import TZ
     e, _, _ = run(cfg, [])
     assert e.cfg.trade_start_hour == 8 and e.cfg.trade_end_hour == 20          # seeded once
-    assert db.get(e.c, "rules_changed_what").startswith("Daytime only")
+    assert db.get(e.c, "settings_seeds") and "2026-11-03-daytime-8-20" in db.get(e.c, "settings_seeds")
     at = lambda h, m=0: datetime(2026, 11, 3, h, m, tzinfo=TZ)
     assert e.trading_hours_open(at(8)) and e.trading_hours_open(at(19, 59))
     assert not e.trading_hours_open(at(20)) and not e.trading_hours_open(at(3))
@@ -945,3 +945,46 @@ def test_trading_hours_seed_upgrade_keeps_old_rules(cfg):
     db.put(c, "settings", {"mom_min_z": 0.8, "min_price": 0.50, "max_price": 0.75})   # Burt's 50c change
     e = Engine(cfg, public=FakePublic(), price_fn=make_price_fn(), conn=c)
     assert e.cfg.min_price == 0.50 and e.cfg.trade_start_hour == 8           # phone edit kept, hours added
+
+
+def test_variant_p_panic_fade_bets_against_sharp_moves():
+    from scanner import variants
+    c = Config()
+    p = variants.params(c, next(v for v in variants.VARIANTS if v["id"] == "P"))
+    m = {"strike_type": "greater_or_equal", "floor_strike": 100_000}
+    px = {"price": 100_150.0, "sigma_1m": 0.0008}
+    q = {"yes_ask": 0.62, "yes_ask_size": 50, "no_ask": 0.40, "no_ask_size": 50}
+    calm = {"dir": "UP", "z": 1.0, "r1": 0.0001, "drift_1m": 0.0001}
+    spike = {"dir": "UP", "z": 2.2, "r1": 0.0003, "drift_1m": 0.0003}
+    assert variants.decide(p, m, q, px, calm, 6, 5.33, "yes", 1.0) is None          # not sharp enough
+    t = variants.decide(p, m, q, px, spike, 6, 5.33, "yes", 1.0)
+    assert t["side"] == "no" and t["direction"] == "DOWN" and t["price"] == 0.41     # fades the spike
+    assert variants.decide(p, m, dict(q, no_ask=0.15), px, spike, 6, 5.33, "yes", 1.0) is None   # too cheap
+
+
+def test_paused_markets_and_btc_gold_seed(cfg):
+    e, _, rows = run(cfg, [mk("KXBTC15M-PZ", 99_900, 0.55, 0.50, minutes=6)])
+    assert e.paused() == {"SILVER", "WTI", "NATGAS"}                                 # seeded once
+    db.put(e.c, "paused_assets", ["BTC"])
+    r = {x["ticker"]: x for x in e.cycle()}["KXBTC15M-PZ"]
+    assert "paused" in r["note"] or r["status"] == "IN TRADE"
+
+
+def test_tests_csv_export(cfg, tmp_path, monkeypatch):
+    import importlib, os
+    monkeypatch.setenv("DB_PATH", str(tmp_path / "d.db"))
+    monkeypatch.setenv("DASH_PASSWORD", "")
+    import dashboard.app as app_mod
+    app_mod = importlib.reload(app_mod)
+    db.put(app_mod.conn, "sheet_token", "tok123")
+    db.put(app_mod.conn, "state", {"ts": time.time(), "variant_since": time.time(),
+        "variants": [{"id": "A", "name": "Current", "what": "x", "trades": 10, "open": 0,
+                      "win_rate": 60.0, "pnl": 0.5, "per_trade": 0.05}],
+        "maker_test": {"posted": 4, "filled": 2, "cancelled": 2, "resting": 0, "fill_rate": 50.0, "settled": 2,
+                       "win_rate": 50.0, "pnl": 0.1, "per_trade": 0.05, "avg_price": 0.55,
+                       "a_same_n": 1, "a_same_pnl": -0.5, "a_all_n": 10, "a_all_pnl": 0.5, "a_per_trade": 0.05},
+        "exit_test": [{"rule": "hold", "name": "Hold", "trades": 10, "exits": 0, "pnl": 0.5, "saved": 0, "gave_up": 0}]})
+    c = app_mod.app.test_client()
+    assert c.get("/sheet/bad/tests.csv").status_code == 404
+    txt = c.get("/sheet/tok123/tests.csv").get_data(as_text=True)
+    assert "A Current" in txt and "Resting bids" in txt and "50.0%" in txt and "Hold" in txt

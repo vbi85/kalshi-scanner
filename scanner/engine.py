@@ -141,8 +141,10 @@ class Engine:
             if seed["id"] in done:
                 continue
             cur = db.get(self.c, "settings") or {}
-            cur.update(seed["values"])
+            cur.update(seed.get("values", {}))
             db.put(self.c, "settings", cur)
+            if "paused" in seed:
+                db.put(self.c, "paused_assets", sorted(set(db.get(self.c, "paused_assets") or []) | set(seed["paused"])))
             done.add(seed["id"])
             db.put(self.c, "settings_seeds", sorted(done))
             db.put(self.c, "rules_changed_at", time.time())
@@ -167,6 +169,10 @@ class Engine:
         return {"what": db.get(self.c, "rules_changed_what") or "", "since": t0, "hours": hours,
                 "elapsed_h": round((time.time() - t0) / 3600, 1),
                 "before": summary(before), "after": summary(after)}
+
+    def paused(self):
+        """Markets the main strategy skips (set on the dashboard). Strategy tests keep running."""
+        return set(db.get(self.c, "paused_assets") or [])
 
     def trading_hours_open(self, now=None):
         """Main strategy only trades inside the hours set on the dashboard (Central time)."""
@@ -344,6 +350,8 @@ class Engine:
             row["status"], row["note"] = "WAITING", f"trading opens in {mmss(mins - cfg.entry_start_min)}"
         elif mins < cfg.entry_end_min:
             row["status"], row["note"] = "CLOSED", f"no new trades under {mmss(cfg.entry_end_min)}"
+        elif info["asset"] in self.paused():
+            row["status"], row["note"] = "WAITING", "paused by you — strategy tests still run"
         elif not self.trading_hours_open():
             row["status"], row["note"] = "WAITING", f"outside trading hours ({self.hours_text()} Central)"
         elif abs(mom["z"]) < cfg.mom_min_z:
@@ -481,7 +489,7 @@ class Engine:
             return
         if o or not (cfg.entry_end_min + self.MAKER_CANCEL_EXTRA <= mins <= cfg.entry_start_min):
             return
-        if not self.trading_hours_open():                  # same hours as the main strategy
+        if not self.trading_hours_open() or asset in self.paused():   # same rules as the main strategy
             return
         if abs(mom["z"]) < cfg.mom_min_z or mom["r1"] * mom["drift_1m"] < 0:
             return
@@ -668,6 +676,7 @@ class Engine:
             "variant_since": db.get(self.c, "variant_since"),
             "exit_test": self.exit_stats(),
             "maker_test": self.maker_stats(),
+            "paused": sorted(self.paused()),
             "rule_test": self.rule_test(),
             "settings": {"entry_start": self.cfg.entry_start_min, "entry_end": self.cfg.entry_end_min,
                          "min_edge": self.cfg.min_edge, "mom_min_z": self.cfg.mom_min_z,

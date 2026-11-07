@@ -294,7 +294,7 @@
   <div class="card" id="ruleTest"><div class="empty">No rule change recorded yet.</div></div>
   <div style="margin-top:10px"><button class="btn2" onclick="openSettings()">⚙ Trading settings</button></div>
 
-  <h2>Strategy test — 8 settings paper-trading side by side</h2>
+  <h2>Strategy test — 9 settings paper-trading side by side</h2>
   <div class="tablewrap"><table class="vt">
     <thead><tr><th>#</th><th>Strategy</th><th>Trades</th><th>Win %</th><th>P&amp;L</th><th class="hm">Per trade</th></tr></thead>
     <tbody id="variants"></tbody>
@@ -380,9 +380,9 @@ function cardHTML(c){
   } else if (c.side && c.price){
     action = `<div class="action">${c.status==='TRADE'?'<b class="pos">TRADE:</b>':'If triggered:'} buy <b>${c.side.toUpperCase()}</b> @ ${c.price.toFixed(2)} · edge <span class="${cls(c.edge)}">${c.edge==null?'—':(c.edge>0?'+':'')+c.edge.toFixed(2)}</span></div>`;
   }
-  const note = (c.close_ts && c.status!=='WAITING') ? `<div class="muted" style="font-size:13px;margin-top:6px">${esc(c.note)}</div>` : '';
+  const note = (c.close_ts && (c.status!=='WAITING' || /paused|hours/.test(c.note||''))) ? `<div class="muted" style="font-size:13px;margin-top:6px">${esc(c.note)}</div>` : '';
   return `<div class="card mk s-${sid}">
-    <div class="mk-head"><b>${esc(c.label||c.asset)}</b><span class="st ${sid}">${esc(c.status)}</span></div>
+    <div class="mk-head"><b>${esc(c.label||c.asset)}</b><span><button class="btn2" style="padding:4px 10px;font-size:12px;margin-right:8px" onclick="togglePause('${c.asset}')">${(lastState.paused||[]).includes(c.asset)?'▶ Resume':'⏸ Pause'}</button><span class="st ${sid}">${esc(c.status)}</span></span></div>
     ${clock}${tl}
     <div class="row2">
       <div class="stat"><div class="l">Target</div><div class="v">${num(c.target,decimals)}</div></div>
@@ -631,6 +631,11 @@ async function disconnectKey(){
   await post('/api/kalshi-key', null, 'DELETE'); closeSheet('keySheet'); load();
 }
 
+async function togglePause(asset){
+  const on = (lastState.paused||[]).includes(asset);
+  const r = await post('/api/markets', {asset, paused: !on});
+  if (r && r.ok) { lastState.paused = r.paused; load(); }
+}
 function schwabAction(){
   const S = lastState.schwab||{};
   if (S.app && !S.connected){ location.href='/api/schwab-login'; return; }
