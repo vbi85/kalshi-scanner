@@ -256,6 +256,21 @@ class Engine:
 
     GAP_WINDOWS = 6     # gap correction follows the last 6 windows (~90 min) so it keeps up when the gap moves
 
+    GAP_JUMP_MULT = 2.5   # gap may wobble up to 2.5x the asset's accuracy limit between windows
+
+    def gap_unstable(self, asset):
+        """True while Kalshi's target vs our price gap is jumping (e.g. Kalshi rolls to a new gold contract).
+        Trading on a moving gap shows fake bargains, so the asset waits until 3 windows agree."""
+        if not ASSETS.get(asset, {}).get("basis_correct"):
+            return False
+        hist = (db.get(self.c, f"{asset.lower()}_accuracy") or [])[-3:]
+        if len(hist) < 3:
+            return False
+        pct = ASSETS[asset].get("max_err_pct") or self.cfg.gate_max_price_err_pct_gold
+        limit = self.GAP_JUMP_MULT * pct / 100 * abs(hist[-1].get("kalshi") or 0)
+        diffs = [h["diff"] for h in hist]
+        return limit > 0 and (max(diffs) - min(diffs)) > limit
+
     def basis_offset(self, asset, last=None, min_checks=3):
         """Typical gap between Kalshi's target and our price, learned every window (median, robust)."""
         if not ASSETS.get(asset, {}).get("basis_correct"):
@@ -314,6 +329,8 @@ class Engine:
             return blocked("price feed down" + (f" (Schwab: {feed.status})" if feed else ""))
         if not px.get("sigma_1m"):
             return blocked("building price history (about 11 min after a restart)")
+        if self.gap_unstable(info["asset"]):
+            return blocked("price gap vs Kalshi is jumping — waiting until 3 windows agree")
         if px["age_sec"] > cfg.max_price_age_sec:
             return blocked(f"price {px['age_sec'] / 60:.0f} min delayed — unsafe")
         mom = momentum(px["price"], px.get("closes"), px["sigma_1m"], cfg.mom_lookback_min)

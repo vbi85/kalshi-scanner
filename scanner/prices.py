@@ -87,6 +87,15 @@ PAXG_SOURCES = {
                  lambda j: (lambda r: _mid(r["b"][0], r["a"][0], r["c"][0]))(next(iter(j["result"].values())))),
     "Gemini":   ("https://api.gemini.com/v1/pubticker/paxgusd",
                  lambda j: _mid(j.get("bid"), j.get("ask"), j.get("last"))),
+    # backups added Nov 11 (one of the three above stopped answering)
+    "Bitstamp": ("https://www.bitstamp.net/api/v2/ticker/paxgusd/",
+                 lambda j: _mid(j.get("bid"), j.get("ask"), j.get("last"))),
+    "Bitfinex": ("https://api-pub.bitfinex.com/v2/ticker/tPAXG:USD",
+                 lambda j: _mid(j[0], j[2], j[6])),
+    "OKX":      ("https://www.okx.com/api/v5/market/ticker?instId=PAXG-USDT",
+                 lambda j: (lambda d: _mid(d["bidPx"], d["askPx"], d["last"]))(j["data"][0])),
+    "KuCoin":   ("https://api.kucoin.com/api/v1/market/orderbook/level1?symbol=PAXG-USDT",
+                 lambda j: _mid(j["data"]["bestBid"], j["data"]["bestAsk"], j["data"]["price"])),
 }
 
 
@@ -174,9 +183,9 @@ class BtcComposite(Composite):
 
 
 class GoldComposite(Composite):
-    # PAXG trades on fewer exchanges, so one live source is accepted (accuracy is still checked every window)
+    # PAXG: 7 exchanges polled; at least 2 must agree (median, outliers dropped)
     def __init__(self, session=None, interval=2.0, start=True):
-        super().__init__(PAXG_SOURCES, session, interval, start, min_sources=1, outlier_pct=0.004,
+        super().__init__(PAXG_SOURCES, session, interval, start, min_sources=2, outlier_pct=0.004,
                          name="gold-composite")
 
 

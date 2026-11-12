@@ -530,7 +530,7 @@ def test_paxg_composite_reads_exchanges():
     assert n == 2 and 4100.4 < px < 4101.4
     solo = GoldComposite(session=FakeSession({"coinbase": {"bid": "4100", "ask": "4101"}}), start=False)
     solo.sample_once()
-    assert solo.latest()[2] == 1                                          # gold accepts a single live source
+    assert solo.latest() is None                                          # one source alone is no longer trusted
 
 
 def _gold_engine(cfg, gap, windows=4):
@@ -988,3 +988,27 @@ def test_tests_csv_export(cfg, tmp_path, monkeypatch):
     assert c.get("/sheet/bad/tests.csv").status_code == 404
     txt = c.get("/sheet/tok123/tests.csv").get_data(as_text=True)
     assert "A Current" in txt and "Resting bids" in txt and "50.0%" in txt and "Hold" in txt
+
+
+def test_gold_gap_jump_blocks_until_stable(cfg):
+    e, _ = _gold_engine(cfg, gap=0.0, windows=0)
+    mkh = lambda ds: [{"ts": i, "ticker": f"T{i}", "ours": 4100 - d, "kalshi": 4100.0, "diff": d, "pct": 0, "n": 30}
+                      for i, d in enumerate(ds)]
+    db.put(e.c, "gold_accuracy", mkh([-5.0, -5.2, -4.9]))
+    assert not e.gap_unstable("GOLD")                     # steady gap: fine
+    db.put(e.c, "gold_accuracy", mkh([-5.0, -5.2, 8.0]))  # Kalshi jumped to a new contract
+    assert e.gap_unstable("GOLD")
+    db.put(e.c, "gold_accuracy", mkh([8.0, 8.3, 7.9]))    # 3 windows agree again
+    assert not e.gap_unstable("GOLD")
+    assert not e.gap_unstable("BTC")
+
+
+def test_paxg_backup_sources_parse():
+    from scanner.prices import PAXG_SOURCES
+    samples = {"Bitstamp": {"bid": "4100.1", "ask": "4100.9", "last": "4100.5"},
+               "Bitfinex": [4100.1, 2, 4100.9, 3, 0, 0, 4100.5, 0, 0, 0],
+               "OKX": {"data": [{"bidPx": "4100.1", "askPx": "4100.9", "last": "4100.5"}]},
+               "KuCoin": {"data": {"bestBid": "4100.1", "bestAsk": "4100.9", "price": "4100.5"}}}
+    for name, j in samples.items():
+        assert PAXG_SOURCES[name][1](j) == pytest.approx(4100.5)
+    assert len(PAXG_SOURCES) == 7
