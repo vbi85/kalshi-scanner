@@ -5,6 +5,7 @@ comparable. Variants never place real orders and never affect the approval gates
 the bot's main strategy (and live trading) is untouched.
 To change what is tested, edit VARIANTS below and run kalshi-update.
 """
+import math
 import os
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -16,42 +17,72 @@ TZ = ZoneInfo(os.getenv("TZ_NAME", "America/Chicago"))
 # Change VARIANT_SET whenever the list changes: the dashboard then restarts the counts.
 VARIANT_SET = "v2-2026-10-25"
 VARIANTS = [
-    {"id": "A", "name": "Current",       "what": "Your live settings (now momentum 0.8+, 40¢–75¢)", "over": {}},
-    {"id": "B", "name": "Old rules",     "what": "Before tonight: momentum 0.5+, 5¢–90¢",
-     "over": {"mom_min_z": 0.5, "min_price": 0.05, "max_price": 0.90}},
-    {"id": "C", "name": "Edge 8¢",       "what": "Current + minimum edge 8¢", "over": {"min_edge": 0.08}},
-    {"id": "D", "name": "Calmer odds",   "what": "Current + volatility ×1.5, momentum weight 0.15",
+    {"id": "A", "name": "Current", "what": "Your live settings", "over": {}},
+    {"id": "C", "name": "Edge 8¢", "what": "Current + minimum edge 8¢", "over": {"min_edge": 0.08}},
+    {"id": "D", "name": "Calmer odds", "what": "Current + volatility ×1.5, momentum weight 0.15",
      "over": {"vol_mult": 1.5, "mom_weight": 0.15}},
-    {"id": "E", "name": "No big spikes", "what": "Current + skip momentum above 2.0", "over": {"mom_max_z": 2.0}},
-    # added Oct 27 (counts start then): a 20c+ "edge" usually means our price is off, not a real bargain
-    {"id": "F", "name": "Skip huge edges", "what": "Current + skip edges above 20¢ (too good to be true)",
-     "over": {"max_edge": 0.20}},
-    # added Oct 29: the bot's odds ran ~13 pts too confident (71% vs 58% actual = Kalshi's price).
-    # Trust Kalshi's price 65%, our model 35%; trade only if an edge survives that.
     {"id": "G", "name": "Calibrated odds", "what": "Current, but odds = 65% Kalshi price + 35% bot model",
      "over": {"calib_k": 0.35}},
-    # added Nov 1: 8 PM-8 AM lost $7.82 on 149 trades; 8 AM-8 PM made $2.68 on 151
     {"id": "H", "name": "Daytime only", "what": "Current, but only trades 8 AM-8 PM Central",
      "over": {"day_hours": (8, 20)}},
-    # added Nov 7: the only strategy family profitable in a 4,904-strategy Kalshi BTC 15-min backtest
-    # was "panic fade" (bet AGAINST sharp moves). Our bot bets WITH them. P tests the opposite.
     {"id": "P", "name": "Panic fade", "what": "Bet AGAINST sharp moves (momentum 1.5+), cheap side 25¢–55¢",
      "over": {"fade_z": 1.5, "fade_min": 0.25, "fade_max": 0.55}},
+    # ---- added Nov 14 from other builders' rules ----
+    {"id": "L", "name": "Late conviction", "what": "Last 5→2 min: buy the 70¢–90¢ favorite when price is clearly past the target and the move wasn't choppy",
+     "over": {"mode": "late", "win": (2.0, 5.0), "fav_min": 0.70, "fav_max": 0.90, "min_dist": 0.8, "max_retrace": 0.30}},
+    {"id": "Q", "name": "Delta + calm", "what": "Current + price clearly past the target (0.5σ) + skip choppy moves",
+     "over": {"min_dist": 0.5, "max_retrace": 0.30}},
+    {"id": "R", "name": "Cool-down", "what": "Current + sit out one window after a loss",
+     "over": {"cooldown": True}},
+    {"id": "K", "name": "Cheap early", "what": "8+ min left: buy a side at 15¢–35¢ moving our way; sell at 75¢ or at 2:00 left",
+     "over": {"mode": "cheap", "win": (8.0, 14.0), "cheap_min": 0.15, "cheap_max": 0.35, "tp": 0.75, "time_exit": 2.0}},
 ]
 
 KEYS = ("min_edge", "max_price", "min_price", "vol_mult", "mom_weight", "mom_min_z", "mom_max_z",
-        "min_ask_size", "slippage", "max_edge", "calib_k", "day_hours", "fade_z", "fade_min", "fade_max")
+        "min_ask_size", "slippage", "max_edge", "calib_k", "day_hours", "fade_z", "fade_min", "fade_max",
+        "mode", "win", "fav_min", "fav_max", "min_dist", "max_retrace", "cooldown", "cheap_min", "cheap_max",
+        "tp", "time_exit", "entry_start_min", "entry_end_min")
 
 
 def params(cfg, variant):
     p = {k: getattr(cfg, k, None) for k in KEYS}
+    p["win"] = (cfg.entry_end_min, cfg.entry_start_min)     # default trade window: same as the bot
     p.update(variant["over"])
     return p
 
 
+def distance_sigma(m, px, mins_eff):
+    """How far price is past Kalshi's target, in expected moves for the time left (0 = right at it)."""
+    k = m.get("floor_strike") or m.get("cap_strike")
+    sig = px.get("sigma_1m")
+    if not k or not sig or not px.get("price"):
+        return 0.0
+    return abs(math.log(px["price"] / float(k))) / (sig * math.sqrt(max(mins_eff, 0.5)))
+
+
+def retrace(px, mins):
+    """Share of this window's biggest move that has since been given back (0 = clean trend, 1 = all gone)."""
+    n = max(2, int(15 - mins) + 1)
+    seg = (px.get("closes") or [])[-n:]
+    if len(seg) < 3:
+        return 0.0
+    moves = [x - seg[0] for x in seg]
+    peak = max(abs(x) for x in moves)
+    return 0.0 if not peak else max(0.0, (peak - abs(moves[-1])) / peak)
+
+
 def decide(p, m, q, px, mom, mins, mins_eff, usd, fee_mult):
     """Return a trade dict if this variant would trade right now, else None.
-    Caller has already checked: inside the 7:30–2:00 window, live price, momentum available."""
+    Caller has already checked: a live price and momentum are available."""
+    lo, hi = p.get("win") or (p.get("entry_end_min") or 2.0, p.get("entry_start_min") or 7.5)
+    if not (lo <= mins <= hi):
+        return None
+    if p.get("cooldown") and p.get("_lost_last"):
+        return None
+    if p.get("mode") == "late":
+        return _late(p, m, q, px, mom, mins, mins_eff, usd, fee_mult)
+    if p.get("mode") == "cheap":
+        return _cheap(p, m, q, px, mom, mins, mins_eff, usd, fee_mult)
     if p.get("day_hours"):
         start, end = p["day_hours"]
         if not (start <= (p.get("_now") or datetime.now(TZ)).hour < end):
@@ -61,6 +92,10 @@ def decide(p, m, q, px, mom, mins, mins_eff, usd, fee_mult):
     if abs(mom["z"]) < p["mom_min_z"] or mom["r1"] * mom["drift_1m"] < 0:
         return None
     if p.get("mom_max_z") and abs(mom["z"]) > p["mom_max_z"]:
+        return None
+    if p.get("min_dist") and distance_sigma(m, px, mins_eff) < p["min_dist"]:
+        return None
+    if p.get("max_retrace") is not None and retrace(px, mins) > p["max_retrace"]:
         return None
     drift = p["mom_weight"] * mom["drift_1m"]
     fair = fair_yes(m, px["price"], px["sigma_1m"], mins_eff, p["vol_mult"], drift)
@@ -99,6 +134,42 @@ def _fade(p, m, q, px, mom, mins, mins_eff, usd, fee_mult):
             "fair": None if fair is None else round(fair, 4), "edge": 0.0,
             "direction": "DOWN" if mom["dir"] == "UP" else "UP", "mom_z": round(mom["z"], 3),
             "minutes_left": round(mins, 2)}
+
+
+def _late(p, m, q, px, mom, mins, mins_eff, usd, fee_mult):
+    """Late conviction: near the end, back the clear favorite when price is well past the target."""
+    if distance_sigma(m, px, mins_eff) < p["min_dist"] or retrace(px, mins) > p["max_retrace"]:
+        return None
+    fair = fair_yes(m, px["price"], px["sigma_1m"], mins_eff, p["vol_mult"], 0.0)
+    if fair is None:
+        return None
+    side = "yes" if fair >= 0.5 else "no"                                # the side price is already on
+    price, size = q[f"{side}_ask"], q[f"{side}_ask_size"]
+    if not price or not (p["fav_min"] <= price <= p["fav_max"]) or size < p["min_ask_size"]:
+        return None
+    p_side = fair if side == "yes" else 1 - fair
+    fill = round(min(0.99, price + p["slippage"]), 4)
+    fee = taker_fee(fill, 1, fee_mult)
+    if p_side < fill + fee:                                              # model must not disagree
+        return None
+    up = (side == usd)
+    return {"side": side, "price": fill, "fee": fee, "fair": round(fair, 4), "edge": round(p_side - fill - fee, 4),
+            "direction": "UP" if up else "DOWN", "mom_z": round(mom["z"], 3), "minutes_left": round(mins, 2)}
+
+
+def _cheap(p, m, q, px, mom, mins, mins_eff, usd, fee_mult):
+    """Cheap early: buy a long-shot side (15-35c) that momentum is moving toward; managed exit (tp / time)."""
+    side = usd if mom["dir"] == "UP" else ("no" if usd == "yes" else "yes")
+    if abs(mom["z"]) < 0.5:
+        return None
+    price, size = q[f"{side}_ask"], q[f"{side}_ask_size"]
+    if not price or not (p["cheap_min"] <= price <= p["cheap_max"]) or size < p["min_ask_size"]:
+        return None
+    fill = round(min(0.99, price + p["slippage"]), 4)
+    fair = fair_yes(m, px["price"], px["sigma_1m"], mins_eff, p["vol_mult"], p["mom_weight"] * mom["drift_1m"])
+    return {"side": side, "price": fill, "fee": taker_fee(fill, 1, fee_mult),
+            "fair": None if fair is None else round(fair, 4), "edge": 0.0,
+            "direction": mom["dir"], "mom_z": round(mom["z"], 3), "minutes_left": round(mins, 2)}
 
 
 def stats(rows):

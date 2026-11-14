@@ -107,7 +107,7 @@ def test_classify():
     assert classify_asset("KXBTC15M Bitcoin price up or down in 15 min") == "BTC"
     assert classify_asset("KXGOLD15M Gold 15 min") == "GOLD"
     assert classify_asset("KXWTI15M WTI Oil 15 min") == "WTI"
-    assert classify_asset("KXETH15M Ethereum 15 min") is None
+    assert classify_asset("KXETH15M Ethereum 15 min") == "ETH"   # added Nov 14
     assert classify_asset("Brent crude close") is None
 
 
@@ -473,10 +473,10 @@ def test_google_sheet_feed(cfg):
 # ---------------- side-by-side strategy test ----------------
 def test_variants_trade_same_window_with_their_own_rules(cfg):
     from scanner import variants
-    # 80¢ is above the new 75¢ cap: only B (old rules, up to 90¢) may trade it; the main bot must skip it
+    # 80¢ is above the 75¢ cap: neither the main bot nor the current-rule tests may trade it
     e, pub, _ = run(cfg, [mk("KXBTC15M-V", 99_700, 0.80, 0.75, minutes=6)])
     got = {r["variant"] for r in db.shadow_all(e.c)}
-    assert got == {"B"} and db.recent(e.c) == []
+    assert not got & {"A", "C", "D", "G", "H", "Q", "R"} and db.recent(e.c) == []
     # 55¢ is inside the band: A trades it and mirrors the main bot exactly
     e2, pub2, _ = run(cfg, [mk("KXBTC15M-W", 99_900, 0.55, 0.50, minutes=6)])
     rows = db.shadow_all(e2.c)
@@ -771,19 +771,6 @@ def test_futures_card_says_connect_schwab(cfg, tmp_path):
     assert r["status"] == "BLOCKED" and "Connect Schwab" in r["note"]
 
 
-def test_variant_f_skips_too_good_to_be_true():
-    from scanner import variants
-    c = Config()
-    m = {"strike_type": "greater_or_equal", "floor_strike": 100_000}
-    q = {"yes_ask": 0.40, "yes_ask_size": 50, "no_ask": 0.62, "no_ask_size": 50}
-    px = {"price": 100_150.0, "sigma_1m": 0.0008}                 # far above target -> huge "edge"
-    mom = {"dir": "UP", "z": 1.0, "r1": 0.0001, "drift_1m": 0.0001}
-    p = lambda vid: variants.params(c, next(v for v in variants.VARIANTS if v["id"] == vid))
-    a = variants.decide(p("A"), m, q, px, mom, 6, 5.33, "yes", 1.0)
-    f = variants.decide(p("F"), m, q, px, mom, 6, 5.33, "yes", 1.0)
-    assert a and a["edge"] > 0.20 and f is None
-
-
 def test_gold_gap_follows_a_moving_gap(cfg):
     e, _ = _gold_engine(cfg, gap=0.0, windows=0)
     hist = [{"ts": i, "ticker": f"T{i}", "ours": 0, "kalshi": 4100.0, "diff": d, "pct": 0, "n": 30}
@@ -1012,3 +999,59 @@ def test_paxg_backup_sources_parse():
     for name, j in samples.items():
         assert PAXG_SOURCES[name][1](j) == pytest.approx(4100.5)
     assert len(PAXG_SOURCES) == 7
+
+
+
+def _vp(vid):
+    from scanner import variants
+    return variants.params(Config(), next(v for v in variants.VARIANTS if v["id"] == vid))
+
+
+def test_variant_l_late_conviction():
+    from scanner import variants
+    m = {"strike_type": "greater_or_equal", "floor_strike": 100_000}
+    mom = {"dir": "UP", "z": 1.0, "r1": 0.0001, "drift_1m": 0.0001}
+    clean = [100_000 + 20 * i for i in range(12)] + [100_240.0]          # steady climb, no retrace
+    px = {"price": 100_240.0, "sigma_1m": 0.0006, "closes": clean}
+    q = {"yes_ask": 0.80, "yes_ask_size": 50, "no_ask": 0.22, "no_ask_size": 50}
+    t = variants.decide(_vp("L"), m, q, px, mom, 3.5, 2.83, "yes", 1.0)
+    assert t and t["side"] == "yes" and t["price"] == 0.81
+    assert variants.decide(_vp("L"), m, q, px, mom, 6.0, 5.33, "yes", 1.0) is None          # too early
+    choppy = dict(px, closes=[100_000, 100_600, 100_550, 100_400, 100_300, 100_240])        # gave back 60%
+    assert variants.decide(_vp("L"), m, q, choppy, mom, 3.5, 2.83, "yes", 1.0) is None
+    assert variants.decide(_vp("L"), m, dict(q, yes_ask=0.95), px, mom, 3.5, 2.83, "yes", 1.0) is None
+
+
+def test_variant_q_needs_distance_and_r_cools_down():
+    from scanner import variants
+    m = {"strike_type": "greater_or_equal", "floor_strike": 100_000}
+    mom = {"dir": "UP", "z": 1.0, "r1": 0.0001, "drift_1m": 0.0001}
+    q = {"yes_ask": 0.44, "yes_ask_size": 50, "no_ask": 0.60, "no_ask_size": 50}
+    near = {"price": 100_005.0, "sigma_1m": 0.0008, "closes": [100_000 + i for i in range(6)]}
+    assert variants.decide(_vp("A"), m, q, near, mom, 6, 5.33, "yes", 1.0)
+    assert variants.decide(_vp("Q"), m, q, near, mom, 6, 5.33, "yes", 1.0) is None          # too close to target
+    r = _vp("R")
+    assert variants.decide(r, m, q, near, mom, 6, 5.33, "yes", 1.0)
+    assert variants.decide(dict(r, _lost_last=True), m, q, near, mom, 6, 5.33, "yes", 1.0) is None
+
+
+def test_variant_k_cheap_early_takes_profit(cfg):
+    from scanner import variants
+    m = {"strike_type": "greater_or_equal", "floor_strike": 100_000, "ticker": "KXBTC15M-K"}
+    mom = {"dir": "UP", "z": 0.9, "r1": 0.0001, "drift_1m": 0.0001}
+    q = {"yes_ask": 0.30, "yes_ask_size": 50, "no_ask": 0.72, "no_ask_size": 50}
+    px = {"price": 99_960.0, "sigma_1m": 0.0008}
+    t = variants.decide(_vp("K"), m, q, px, mom, 11, 10.33, "yes", 1.0)
+    assert t and t["side"] == "yes" and t["price"] == 0.31
+    assert variants.decide(_vp("K"), m, q, px, mom, 6, 5.33, "yes", 1.0) is None            # not early
+    e, _, _ = run(cfg, [])
+    db.shadow_record(e.c, ts=time.time(), variant="K", asset="BTC", ticker="KXBTC15M-K", close_ts=1, **t)
+    e.manage_variant_exits(m, {"yes_ask": 0.80, "no_ask": 0.22}, 7.0, 1.0)    # bid 0.78 -> sell 0.77 >= 0.75
+    row = db.shadow_all(e.c)[0]
+    assert row["status"] == "won" and row["pnl"] > 0.4
+
+
+def test_eth_market_supported():
+    from scanner.prices import ETH_SOURCES, FEEDS
+    assert classify_asset("KXETH15M Ethereum 15 min") == "ETH" and "erti" in FEEDS
+    assert "KXETH15M" in Config().series and len(ETH_SOURCES) == 4

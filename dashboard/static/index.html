@@ -294,13 +294,14 @@
   <div class="card" id="ruleTest"><div class="empty">No rule change recorded yet.</div></div>
   <div style="margin-top:10px"><button class="btn2" onclick="openSettings()">⚙ Trading settings</button></div>
 
-  <h2>Strategy test — 9 settings paper-trading side by side</h2>
+  <h2>Strategy test — 10 settings paper-trading side by side</h2>
   <div class="tablewrap"><table class="vt">
     <thead><tr><th>#</th><th>Strategy</th><th>Trades</th><th>Win %</th><th>P&amp;L</th><th class="hm">Per trade</th></tr></thead>
     <tbody id="variants"></tbody>
   </table></div>
   <div class="muted" id="vnote" style="font-size:13px;margin-top:8px"></div>
 
+  <div id="oldTests" style="display:none">
   <h2>Maker test — resting bids vs taking the ask (paper)</h2>
   <div class="card" id="makerTest"><div class="empty">Starting…</div></div>
 
@@ -310,6 +311,7 @@
     <tbody id="exitTest"></tbody>
   </table></div>
   <div class="muted" style="font-size:13px;margin-top:8px">Same paper trades, three ways. "Sell early" sells when the bot's odds say the contract is worth less than a buyer will pay. Judge after ~100 trades.</div>
+  </div>
 
   <h2>Approval gates — live trading unlocks per market when every box is green</h2>
   <div id="fundMsg" class="card" style="display:none;border-color:#7a5a00;color:var(--amber);margin-bottom:12px"></div>
@@ -521,6 +523,7 @@ async function load(){
         <span class="v">${esc(c.value)} <span class="muted">/ ${esc(c.target)}</span></span></div>`).join('')}</details>`;
   }).join('') : '<div class="card empty">Waiting for first scan…</div>';
 
+  $('oldTests').style.display = (s.maker_test || (s.exit_test||[]).length) ? 'block' : 'none';
   const M = s.maker_test;
   if (M) {
     const pt = v => v==null ? '—' : (v>=0?'+':'')+(v*100).toFixed(1)+'¢';

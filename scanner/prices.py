@@ -77,6 +77,19 @@ BTC_SOURCES = {
 }
 
 
+# Ethereum: same method as BTC (Kalshi settles ETH 15-min on CF Benchmarks' ERTI, 60-second average)
+ETH_SOURCES = {
+    "Coinbase": ("https://api.exchange.coinbase.com/products/ETH-USD/ticker",
+                 lambda j: _mid(j.get("bid"), j.get("ask"), j.get("price"))),
+    "Kraken":   ("https://api.kraken.com/0/public/Ticker?pair=ETHUSD",
+                 lambda j: (lambda r: _mid(r["b"][0], r["a"][0], r["c"][0]))(next(iter(j["result"].values())))),
+    "Bitstamp": ("https://www.bitstamp.net/api/v2/ticker/ethusd/",
+                 lambda j: _mid(j.get("bid"), j.get("ask"), j.get("last"))),
+    "Gemini":   ("https://api.gemini.com/v1/pubticker/ethusd",
+                 lambda j: _mid(j.get("bid"), j.get("ask"), j.get("last"))),
+}
+
+
 # Live gold: PAXG is a token backed 1:1 by one troy ounce of gold, traded 24/7.
 # It tracks spot gold in real time for free. The engine measures and removes the gap
 # between PAXG and the price Kalshi actually settles gold on (see Engine.basis_offset).
@@ -190,7 +203,12 @@ class GoldComposite(Composite):
 
 
 _comps = {}
-_FACTORY = {"BTC": BtcComposite, "GOLD": GoldComposite}
+class EthComposite(Composite):
+    def __init__(self, session=None, interval=2.0, start=True):
+        super().__init__(ETH_SOURCES, session, interval, start, min_sources=2, min_price=100, name="eth-composite")
+
+
+_FACTORY = {"BTC": BtcComposite, "ETH": EthComposite, "GOLD": GoldComposite}
 
 
 def composite(asset, start=True):
@@ -233,6 +251,10 @@ def _composite_feed(asset, candle_symbol, label, lookback_min, session=None):
 
 def brti(symbol, lookback_min, session=None):
     return _composite_feed("BTC", "BTC-USD", "BRTI est.", lookback_min, session)
+
+
+def erti(symbol, lookback_min, session=None):
+    return _composite_feed("ETH", "ETH-USD", "ERTI est.", lookback_min, session)
 
 
 def paxg(symbol, lookback_min, session=None):
@@ -342,7 +364,7 @@ def schwab(symbol, lookback_min, session=None):
             "avg60": avg60, "source": f"Schwab {symbol.upper()}"}
 
 
-FEEDS = {"coinbase": coinbase, "yahoo": yahoo, "brti": brti, "paxg": paxg, "schwab": schwab}
+FEEDS = {"coinbase": coinbase, "yahoo": yahoo, "brti": brti, "erti": erti, "paxg": paxg, "schwab": schwab}
 
 
 def get_price(feed, symbol, lookback_min, session=None):

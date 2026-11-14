@@ -23,11 +23,11 @@ def _bool(name, default):
     return str(_env(name, default)).lower() in ("1", "true", "yes", "on")
 
 
-ALWAYS_SERIES = ["KXSILVER15M"]     # added Oct 26, 2026 even if an older .env list leaves it out
+ALWAYS_SERIES = ["KXSILVER15M", "KXETH15M"]     # added Oct 26, 2026 even if an older .env list leaves it out
 
 
 def _series():
-    out = _list("SERIES", "KXBTC15M,KXGOLD15M,KXSILVER15M,KXWTI15M,KXNATGAS15M")
+    out = _list("SERIES", "KXBTC15M,KXETH15M,KXGOLD15M,KXSILVER15M,KXWTI15M,KXNATGAS15M")
     return out + [s for s in ALWAYS_SERIES if s not in out]
 
 
@@ -124,6 +124,8 @@ ASSETS = {
     # BTC uses a BRTI-style blend of 4 exchanges; Kalshi settles on a 60-second average (settle_avg_sec)
     "BTC":    {"patterns": [r"\bbitcoin\b", r"\bkxbtc"],                           "feed": "brti",     "symbol": "BTC-USD",
                "settle_avg_sec": 60},
+    "ETH":    {"patterns": [r"\bethereum\b", r"\bkxeth"],                         "feed": "erti",     "symbol": "ETH-USD",
+               "settle_avg_sec": 60, "max_err_pct": 0.03},
     # GOLD uses live PAXG (gold-backed token, 24/7) with an automatic correction to Kalshi's gold price
     "GOLD":   {"patterns": [r"\bgold\b", r"\bkxgold"],                             "feed": "paxg",     "symbol": "PAXG-USD",
                "basis_correct": True},
@@ -136,11 +138,11 @@ ASSETS = {
     "NATGAS": {"patterns": [r"\bnatural gas\b", r"\bkxnatgas", r"\bhenry hub\b"], "feed": "schwab",   "symbol": "/NG",
                "basis_correct": True, "max_err_pct": 0.10},
 }
-ASSET_ORDER = ["BTC", "GOLD", "SILVER", "WTI", "NATGAS"]
-ASSET_LABEL = {"BTC": "BTC", "GOLD": "GOLD", "SILVER": "SILVER", "WTI": "OIL (WTI)", "NATGAS": "NAT GAS"}
-ACCURACY_ASSETS = [a for a in ASSET_ORDER if a == "BTC" or ASSETS[a].get("basis_correct")]
+ASSET_ORDER = ["BTC", "ETH", "GOLD", "SILVER", "WTI", "NATGAS"]
+ASSET_LABEL = {"BTC": "BTC", "ETH": "ETH", "GOLD": "GOLD", "SILVER": "SILVER", "WTI": "OIL (WTI)", "NATGAS": "NAT GAS"}
+ACCURACY_ASSETS = [a for a in ASSET_ORDER if a in ("BTC", "ETH") or ASSETS[a].get("basis_correct")]
 
-EXCLUDE_PATTERNS = [r"\bethereum\b", r"\bkxeth", r"\bsolana\b", r"\bxrp\b", r"\bdoge", r"\bbrent\b",
+EXCLUDE_PATTERNS = [r"\bsolana\b", r"\bxrp\b", r"\bdoge", r"\bbrent\b",
                     r"\bgasoline\b", r"\bgas prices?\b", r"\bdominance\b"]
 
 

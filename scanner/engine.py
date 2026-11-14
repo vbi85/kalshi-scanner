@@ -352,13 +352,8 @@ class Engine:
                    conf=fair if side == "yes" else 1 - fair,
                    price=q[f"{side}_ask"] or None, size=q[f"{side}_ask_size"], edge=e)
 
-        if pos and pos["status"] == "open" and mins >= self.EXIT_MIN_LEFT:
-            self.check_exits(pos, q, fair, mins)
-
-        if row["close_ts"]:
-            self.run_maker(m, info, q, fair, mom, mins, usd, row["close_ts"])
-
-        if cfg.entry_end_min <= mins <= cfg.entry_start_min and row["close_ts"]:
+        # Maker and early-exit tests retired Nov 14 (both lost more than the plain strategy).
+        if 0.5 <= mins <= 14.5 and row["close_ts"]:          # each strategy test applies its own time window
             self.run_variants(m, info, q, px, mom, mins, mins_eff, usd, row["close_ts"])
 
         if pos:
@@ -553,11 +548,36 @@ class Engine:
 
     def run_variants(self, m, info, q, px, mom, mins, mins_eff, usd, close_ts):
         fee_mult = info.get("fee_multiplier", 1.0)
+        self.manage_variant_exits(m, q, mins, fee_mult)
         for v in variants.VARIANTS:
-            t = variants.decide(variants.params(self.cfg, v), m, q, px, mom, mins, mins_eff, usd, fee_mult)
+            p = variants.params(self.cfg, v)
+            if p.get("cooldown"):
+                prev = self.c.execute("SELECT status FROM shadow WHERE variant=? AND asset=? AND close_ts=?",
+                                      (v["id"], info["asset"], close_ts - 900)).fetchone()
+                p["_lost_last"] = bool(prev and prev["status"] == "lost")
+            t = variants.decide(p, m, q, px, mom, mins, mins_eff, usd, fee_mult)
             if t:
                 db.shadow_record(self.c, ts=time.time(), variant=v["id"], asset=info["asset"],
                                  ticker=m["ticker"], close_ts=close_ts, **t)
+
+    def manage_variant_exits(self, m, q, mins, fee_mult):
+        """Tests with a managed exit (K): sell at the take-profit bid, or at the bid when time runs low."""
+        rules = {v["id"]: v["over"] for v in variants.VARIANTS if v["over"].get("tp") or v["over"].get("time_exit")}
+        if not rules or not q.get("yes_ask") or not q.get("no_ask"):
+            return
+        for r in self.c.execute("SELECT * FROM shadow WHERE status='open' AND ticker=?", (m["ticker"],)).fetchall():
+            rule = rules.get(r["variant"])
+            if not rule:
+                continue
+            bid = (1 - q["no_ask"]) if r["side"] == "yes" else (1 - q["yes_ask"])
+            sell = round(bid - self.cfg.slippage, 4)
+            if (rule.get("tp") and sell >= rule["tp"]) or (rule.get("time_exit") and mins <= rule["time_exit"]):
+                if sell <= 0:
+                    continue
+                pnl = round(sell - r["price"] - r["fee"] - taker_fee(sell, 1, fee_mult), 4)
+                self.c.execute("UPDATE shadow SET status=?, pnl=?, settled_ts=? WHERE id=?",
+                               ("won" if pnl > 0 else "lost", pnl, time.time(), r["id"]))
+                self.c.commit()
 
     def settle_open(self):
         open_t = db.open_trades(self.c)
@@ -691,8 +711,7 @@ class Engine:
             "variants": variants.stats([r for r in db.shadow_all(self.c)
                                         if r["ts"] >= (db.get(self.c, "variant_since") or 0)]),
             "variant_since": db.get(self.c, "variant_since"),
-            "exit_test": self.exit_stats(),
-            "maker_test": self.maker_stats(),
+
             "paused": sorted(self.paused()),
             "rule_test": self.rule_test(),
             "settings": {"entry_start": self.cfg.entry_start_min, "entry_end": self.cfg.entry_end_min,
